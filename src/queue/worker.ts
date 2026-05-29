@@ -4,6 +4,13 @@ import {
   TransactionJobResult,
 } from "./transactionQueue";
 import { rabbitMQManager, EXCHANGES, ROUTING_KEYS, QUEUES } from "./rabbitmq";
+import {
+  natsManager,
+  NATS_QUEUE_ENABLED,
+  NATS_SUBJECT,
+  NATS_DURABLE_CONSUMER,
+  NATS_CONSUMER_GROUP,
+} from "./nats";
 import { TransactionModel, TransactionStatus } from "../models/transaction";
 import { MobileMoneyService } from "../services/mobilemoney/mobileMoneyService";
 import { StellarService } from "../services/stellar/stellarService";
@@ -21,7 +28,10 @@ const stellarService = new StellarService();
 const userModel = new UserModel();
 const webhookService = new WebhookService();
 
-const CONCURRENCY = 5;
+const CONCURRENCY = Math.max(
+  1,
+  parseInt(process.env.TRANSACTION_WORKER_CONCURRENCY || "5", 10),
+);
 
 function getErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "Unknown error";
@@ -394,16 +404,36 @@ async function processTransaction(data: TransactionJobData): Promise<Transaction
 // }
 
 // Start consuming
-rabbitMQManager.consume<TransactionJobData>(
-  QUEUES.TRANSACTION_PROCESSING,
-  async (data, msg) => {
-    await processTransaction(data);
-  },
-  CONCURRENCY
-).catch(err => logger.error({ err }, "RabbitMQ Consumer error"));
+const consumerLabel = NATS_QUEUE_ENABLED ? "NATS JetStream" : "RabbitMQ";
+
+if (NATS_QUEUE_ENABLED) {
+  natsManager
+    .consume<TransactionJobData>(
+      NATS_SUBJECT,
+      NATS_DURABLE_CONSUMER,
+      NATS_CONSUMER_GROUP,
+      async (data) => {
+        await processTransaction(data);
+      },
+      CONCURRENCY,
+    )
+    .catch((err) => logger.error({ err }, "NATS JetStream Consumer error"));
+} else {
+  rabbitMQManager.consume<TransactionJobData>(
+    QUEUES.TRANSACTION_PROCESSING,
+    async (data) => {
+      await processTransaction(data);
+    },
+    CONCURRENCY,
+  ).catch((err) => logger.error({ err }, "RabbitMQ Consumer error"));
+}
 
 export const transactionWorker = {
-  close: async () => {}, // Handled by rabbitMQManager global shutdown
+  close: async () => {
+    if (NATS_QUEUE_ENABLED) {
+      await natsManager.close();
+    }
+  },
 };
 
 export async function closeWorker() {
