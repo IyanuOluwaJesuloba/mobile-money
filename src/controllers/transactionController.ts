@@ -170,7 +170,7 @@ export const getTransactionHistoryHandler = async (
     // Database Queries
     // If using cursor-based pagination, fetch limit+1 items to determine `hasMore`.
     let transactions = [] as any[];
-    let total = 0 as number | undefined;
+    let total: number | undefined;
 
     if (before || after) {
       const rows = await transactionModel.list(
@@ -201,30 +201,32 @@ export const getTransactionHistoryHandler = async (
       });
     }
 
-    // Legacy offset-based pagination
-    [transactions, total] = await Promise.all([
-      transactionModel.list(
-        limitNum,
-        offsetNum,
+    const rows = await transactionModel.list(
+      limitNum + 1,
+      offsetNum,
+      startDate as string | undefined,
+      endDate as string | undefined,
+      filters,
+    );
+    const hasMore = rows.length > limitNum;
+    transactions = rows.slice(0, limitNum);
+
+    if (offsetNum === 0) {
+      total = await transactionModel.count(
         startDate as string | undefined,
         endDate as string | undefined,
         filters,
-      ),
-      transactionModel.count(
-        startDate as string | undefined,
-        endDate as string | undefined,
-        filters,
-      ),
-    ] as const);
+      );
+    }
 
     // Response
     return res.json({
       data: transactions,
       pagination: {
-        total,
+        total: total ?? null,
         limit: limitNum,
         offset: offsetNum,
-        hasMore: offsetNum + limitNum < total,
+        hasMore,
       },
     });
   } catch (error) {
