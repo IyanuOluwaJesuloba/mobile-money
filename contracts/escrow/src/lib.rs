@@ -124,7 +124,7 @@ mod tests {
         Address, Env,
     };
 
-    fn setup() -> (Env, Address, Address, Address, Address, EscrowContractClient<'static>) {
+    fn setup(custom_issuer: Option<Address>) -> (Env, Address, Address, Address, Address, EscrowContractClient<'static>) {
         let env = Env::default();
         env.mock_all_auths();
 
@@ -133,7 +133,7 @@ mod tests {
         let arbiter = Address::generate(&env);
 
         // Deploy a test SAC token.
-        let token_admin = Address::generate(&env);
+        let token_admin = custom_issuer.unwrap_or_else(|| Address::generate(&env));
         let token_id = env.register_stellar_asset_contract_v2(token_admin.clone());
         let token_sac = StellarAssetClient::new(&env, &token_id.address());
         token_sac.mint(&depositor, &1_000_000);
@@ -146,7 +146,7 @@ mod tests {
 
     #[test]
     fn test_initialize_and_release() {
-        let (env, depositor, beneficiary, arbiter, token, client) = setup();
+        let (env, depositor, beneficiary, arbiter, token, client) = setup(None);
         let amount: i128 = 500_000;
         let emergency_unlock_timestamp = 1_000;
 
@@ -175,7 +175,7 @@ mod tests {
 
     #[test]
     fn test_refund() {
-        let (env, depositor, beneficiary, arbiter, token, client) = setup();
+        let (env, depositor, beneficiary, arbiter, token, client) = setup(None);
         let amount: i128 = 200_000;
         let emergency_unlock_timestamp = 1_000;
 
