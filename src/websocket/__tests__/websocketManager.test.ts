@@ -168,7 +168,7 @@ describe("WebSocketManager", () => {
     const manager = new WebSocketManager({} as Server);
     const client = createMockClient();
 
-    await new Promise((resolve) => setImmediate(resolve));
+    await manager.redisReady;
     connectClient(client);
 
     await manager.broadcastTransactionUpdate({

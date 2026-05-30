@@ -1,0 +1,30 @@
+# GitGuardian configuration file
+# This file helps configure secret detection policies
+
+[general]
+# Show full secret value in reports
+show_secret=false
+
+[secrets]
+# Custom patterns for detecting secrets specific to this project
+
+# Stellar secret keys (start with S)
+stellar_secret=S[A-Z2-7]{55}
+
+# API Keys
+api_key_pattern=(api[_-]?key|apikey)\s*[=:]\s*['"]\s*[a-zA-Z0-9_\-]{20,}['"]\s*
+
+[ignore]
+# Paths to ignore from secret scanning
+node_modules/
+dist/
+build/
+.git/
+coverage/
+.next/
+
+# Files that commonly contain example/test secrets (but are still monitored)
+# Leave commented since we want to catch everything in source code
+# __tests__/
+# *.test.ts
+# *.spec.ts

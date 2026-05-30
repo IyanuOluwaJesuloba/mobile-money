@@ -1,5 +1,10 @@
 import { Pool, QueryResult } from 'pg';
 import { pool } from '../config/database';
+import {
+  decodeLedgerEntryCursor,
+  encodeLedgerEntryCursor,
+  LedgerEntryPage,
+} from '../services/ledgerService';
 
 /**
  * Ledger Model
@@ -33,6 +38,14 @@ export interface LedgerEntryRecord {
   metadata: Record<string, any>;
   created_at: Date;
 }
+
+const normalizeLedgerEntryLimit = (limit: number): number => {
+  if (!Number.isFinite(limit)) {
+    return 100;
+  }
+
+  return Math.min(Math.max(Math.trunc(limit), 1), 500);
+};
 
 export class LedgerModel {
   private pool: Pool;
@@ -165,6 +178,54 @@ export class LedgerModel {
   }
 
   /**
+   * Get ledger entries by account using keyset pagination
+   */
+  async getEntriesByAccountPage(
+    accountCode: string,
+    options: {
+      startDate?: Date;
+      endDate?: Date;
+      limit?: number;
+      cursor?: string;
+    } = {}
+  ): Promise<LedgerEntryPage> {
+    const limit = normalizeLedgerEntryLimit(options.limit ?? 100);
+    const cursor = options.cursor ? decodeLedgerEntryCursor(options.cursor) : null;
+    const result = await this.pool.query(
+      `SELECT le.*, a.code as account_code, a.name as account_name
+       FROM ledger_entries le
+       JOIN accounts a ON le.account_id = a.id
+       WHERE a.code = $1
+         AND ($2::DATE IS NULL OR le.entry_date >= $2)
+         AND ($3::DATE IS NULL OR le.entry_date <= $3)
+         AND (
+           $4::DATE IS NULL
+           OR (le.entry_date, le.created_at, le.id) < ($4::DATE, $5::TIMESTAMP, $6::UUID)
+         )
+       ORDER BY le.entry_date DESC, le.created_at DESC, le.id DESC
+       LIMIT $7`,
+      [
+        accountCode,
+        options.startDate || null,
+        options.endDate || null,
+        cursor?.entryDate || null,
+        cursor?.createdAt || null,
+        cursor?.id || null,
+        limit + 1
+      ]
+    );
+    const hasMore = result.rows.length > limit;
+    const entries = hasMore ? result.rows.slice(0, limit) : result.rows;
+
+    return {
+      entries,
+      nextCursor: hasMore ? encodeLedgerEntryCursor(entries[entries.length - 1]) : null,
+      hasMore,
+      limit,
+    };
+  }
+
+  /**
    * Get ledger entries by reference number
    */
   async getEntriesByReferenceNumber(referenceNumber: string): Promise<LedgerEntryRecord[]> {
@@ -198,6 +259,50 @@ export class LedgerModel {
       [startDate, endDate, limit, offset]
     );
     return result.rows;
+  }
+
+  /**
+   * Get ledger entries by date range using keyset pagination
+   */
+  async getEntriesByDateRangePage(
+    startDate: Date,
+    endDate: Date,
+    options: {
+      limit?: number;
+      cursor?: string;
+    } = {}
+  ): Promise<LedgerEntryPage> {
+    const limit = normalizeLedgerEntryLimit(options.limit ?? 100);
+    const cursor = options.cursor ? decodeLedgerEntryCursor(options.cursor) : null;
+    const result = await this.pool.query(
+      `SELECT le.*, a.code as account_code, a.name as account_name
+       FROM ledger_entries le
+       JOIN accounts a ON le.account_id = a.id
+       WHERE le.entry_date BETWEEN $1 AND $2
+         AND (
+           $3::DATE IS NULL
+           OR (le.entry_date, le.created_at, le.id) < ($3::DATE, $4::TIMESTAMP, $5::UUID)
+         )
+       ORDER BY le.entry_date DESC, le.created_at DESC, le.id DESC
+       LIMIT $6`,
+      [
+        startDate,
+        endDate,
+        cursor?.entryDate || null,
+        cursor?.createdAt || null,
+        cursor?.id || null,
+        limit + 1
+      ]
+    );
+    const hasMore = result.rows.length > limit;
+    const entries = hasMore ? result.rows.slice(0, limit) : result.rows;
+
+    return {
+      entries,
+      nextCursor: hasMore ? encodeLedgerEntryCursor(entries[entries.length - 1]) : null,
+      hasMore,
+      limit,
+    };
   }
 
   /**

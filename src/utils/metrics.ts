@@ -134,6 +134,20 @@ export const activeConnections = new Gauge({
   registers: [register],
 });
 
+export const dbReplicaLagSeconds = new Gauge({
+  name: "db_replica_lag_seconds",
+  help: "Replication lag in seconds for each read replica",
+  labelNames: ["replica_url"],
+  registers: [register],
+});
+
+export const dbReplicaReadEnabled = new Gauge({
+  name: "db_replica_read_enabled",
+  help: "Whether the replica is currently enabled for read routing (1=enabled, 0=disabled)",
+  labelNames: ["replica_url"],
+  registers: [register],
+});
+
 export { register };
 
 // Cache Metrics

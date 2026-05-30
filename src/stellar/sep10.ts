@@ -64,11 +64,16 @@ export function getSep10Config(): Sep10Config {
     throw new Error("Invalid STELLAR_SIGNING_KEY or STELLAR_ISSUER_SECRET format");
   }
 
+  const jwtSecret = process.env.JWT_SECRET;
+  if (!jwtSecret) {
+    throw new Error("JWT_SECRET must be defined for SEP-10 authentication");
+  }
+
   return {
     signingKey,
     webAuthDomain: process.env.WEB_AUTH_DOMAIN || "https://api.mobilemoney.com",
     networkPassphrase: getNetworkPassphrase(),
-    jwtSecret: process.env.JWT_SECRET || "default-jwt-secret",
+    jwtSecret,
     challengeExpiresIn: 900, // 15 minutes
     jwtExpiresIn: "1h",
     homeDomain: process.env.STELLAR_HOME_DOMAIN || "api.mobilemoney.com",

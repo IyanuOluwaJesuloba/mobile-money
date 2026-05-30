@@ -22,6 +22,10 @@ export const RATE_LIMIT_CONFIG = {
   SEP12_LIMIT: 20,
   SEP12_WINDOW_MS: 60 * 60 * 1000, // 1 hour
 
+  // Cancellation rate limit: 5 cancellations per hour per user
+  CANCELLATION_LIMIT: 5,
+  CANCELLATION_WINDOW_MS: 60 * 60 * 1000, // 1 hour
+
   // List queries: warn when requesting more than 1000 items
   MASSIVE_LIST_THRESHOLD: 1000,
 
@@ -156,6 +160,142 @@ export const sep24RateLimiter = async (req: Request, res: Response, next: NextFu
     return res.status(429).json({
       error: "Rate limit exceeded for SEP-24 operations",
       retryAfter: Math.ceil((resetTime - Date.now()) / 1000),
+    });
+  }
+
+  next();
+};
+
+interface SlidingRateLimitResult {
+  allowed: boolean;
+  remaining: number;
+  retryAfterSeconds: number;
+  resetTime: number;
+}
+
+async function checkSlidingWindowRateLimit(
+  key: string,
+  limit: number,
+  windowMs: number,
+): Promise<SlidingRateLimitResult> {
+  const now = Date.now();
+  const windowStart = now - windowMs;
+  const expireSeconds = Math.ceil(windowMs / 1000) + 60;
+  const member = `${now}:${Math.random().toString(36).slice(2, 12)}`;
+
+  if (!redisClient.isOpen) {
+    return {
+      allowed: true,
+      remaining: limit,
+      retryAfterSeconds: 0,
+      resetTime: now + windowMs,
+    };
+  }
+
+  const script = `
+    local key = KEYS[1]
+    local now = tonumber(ARGV[1])
+    local windowStart = tonumber(ARGV[2])
+    local maxRequests = tonumber(ARGV[3])
+    local member = ARGV[4]
+    local expireSeconds = tonumber(ARGV[5])
+
+    redis.call("ZREMRANGEBYSCORE", key, 0, windowStart)
+    local count = redis.call("ZCARD", key)
+
+    if count >= maxRequests then
+      local oldest = 0
+      if count > 0 then
+        local oldestRow = redis.call("ZRANGE", key, 0, 0, "WITHSCORES")
+        oldest = tonumber(oldestRow[2]) or 0
+      end
+      if oldest > 0 then
+        redis.call("EXPIRE", key, expireSeconds)
+      end
+      return {0, count, oldest}
+    end
+
+    redis.call("ZADD", key, now, member)
+    count = count + 1
+    local oldestRow = redis.call("ZRANGE", key, 0, 0, "WITHSCORES")
+    local oldest = tonumber(oldestRow[2]) or now
+    redis.call("EXPIRE", key, expireSeconds)
+    return {1, count, oldest}
+  `;
+
+  try {
+    const result = (await redisClient.sendCommand([
+      "EVAL",
+      script,
+      "1",
+      key,
+      String(now),
+      String(windowStart),
+      String(limit),
+      member,
+      String(expireSeconds),
+    ])) as unknown as [string | number, string | number, string | number];
+
+    const allowed = String(result[0]) === "1";
+    const count = Number(result[1]);
+    const oldestScore = Number(result[2] || now);
+    const retryAfterSeconds = allowed
+      ? 0
+      : Math.max(1, Math.ceil((oldestScore + windowMs - now) / 1000));
+    const resetTime = oldestScore > 0 ? oldestScore + windowMs : now + windowMs;
+
+    return {
+      allowed,
+      remaining: allowed ? Math.max(0, limit - count) : 0,
+      retryAfterSeconds,
+      resetTime,
+    };
+  } catch (error) {
+    console.error("Cancellation rate limit Redis error:", error);
+    return {
+      allowed: true,
+      remaining: limit,
+      retryAfterSeconds: 0,
+      resetTime: now + windowMs,
+    };
+  }
+}
+
+export const cancelTransactionRateLimiter = async (
+  req: Request,
+  res: Response,
+  next: NextFunction,
+) => {
+  const userId = req.jwtUser?.userId;
+
+  if (!userId) {
+    return res.status(401).json({
+      error: "Unauthorized",
+      message: "Valid token required",
+    });
+  }
+
+  const key = `cancellation:events:${userId}`;
+  const {
+    allowed,
+    remaining,
+    retryAfterSeconds,
+    resetTime,
+  } = await checkSlidingWindowRateLimit(
+    key,
+    RATE_LIMIT_CONFIG.CANCELLATION_LIMIT,
+    RATE_LIMIT_CONFIG.CANCELLATION_WINDOW_MS,
+  );
+
+  res.setHeader("X-RateLimit-Limit", String(RATE_LIMIT_CONFIG.CANCELLATION_LIMIT));
+  res.setHeader("X-RateLimit-Remaining", String(remaining));
+  res.setHeader("X-RateLimit-Reset", new Date(resetTime).toISOString());
+
+  if (!allowed) {
+    res.setHeader("Retry-After", String(retryAfterSeconds));
+    return res.status(429).json({
+      error: "Too Many Requests",
+      message: `Too many transaction cancellation requests. Try again in ${retryAfterSeconds} seconds.`,
     });
   }
 

@@ -1,0 +1,171 @@
+﻿
+C:\Users\SWAYY\Desktop\mobile-money\src\auth\oidc.ts
+  4:37  warning  'NextFunction' is defined but never used  @typescript-eslint/no-unused-vars
+
+C:\Users\SWAYY\Desktop\mobile-money\src\auth\sso.ts
+    7:29  warning  'NextFunction' is defined but never used    @typescript-eslint/no-unused-vars
+  231:15  warning  'email' is assigned a value but never used  @typescript-eslint/no-unused-vars
+
+C:\Users\SWAYY\Desktop\mobile-money\src\config\__tests__\appConfig.test.ts
+  1:13  warning  'path' is defined but never used  @typescript-eslint/no-unused-vars
+
+C:\Users\SWAYY\Desktop\mobile-money\src\config\database.ts
+  92:7  warning  'SlowQueryPool' is defined but never used  @typescript-eslint/no-unused-vars
+
+C:\Users\SWAYY\Desktop\mobile-money\src\config\index.ts
+  11:27  warning  'getProviderLimitsConfig' is defined but never used  @typescript-eslint/no-unused-vars
+  11:52  warning  'MobileMoneyProvider' is defined but never used      @typescript-eslint/no-unused-vars
+  12:30  warning  'MIN_TRANSACTION_AMOUNT' is defined but never used   @typescript-eslint/no-unused-vars
+  12:54  warning  'MAX_TRANSACTION_AMOUNT' is defined but never used   @typescript-eslint/no-unused-vars
+  12:78  warning  'KYCLevel' is defined but never used                 @typescript-eslint/no-unused-vars
+
+C:\Users\SWAYY\Desktop\mobile-money\src\controllers\admin\assetWizardController.ts
+  76:39  warning  'issuerSecretKey' is defined but never used. Allowed unused args must match /^_/u        @typescript-eslint/no-unused-vars
+  76:56  warning  'distributionSecretKey' is defined but never used. Allowed unused args must match /^_/u  @typescript-eslint/no-unused-vars
+
+C:\Users\SWAYY\Desktop\mobile-money\src\controllers\amlAuditController.ts
+  366:29  error  A `require()` style import is forbidden  @typescript-eslint/no-require-imports
+
+C:\Users\SWAYY\Desktop\mobile-money\src\controllers\exchangeRateBufferController.ts
+  3:3  warning  'ExchangeRateBufferService' is defined but never used  @typescript-eslint/no-unused-vars
+
+C:\Users\SWAYY\Desktop\mobile-money\src\controllers\transactionController.ts
+  887:11  warning  'transactions' is assigned a value but never used  @typescript-eslint/no-unused-vars
+
+C:\Users\SWAYY\Desktop\mobile-money\src\controllers\twoFactorWithdrawalController.ts
+  4:10  warning  'UserModel' is defined but never used     @typescript-eslint/no-unused-vars
+  5:10  warning  'is2FAEnabled' is defined but never used  @typescript-eslint/no-unused-vars
+
+C:\Users\SWAYY\Desktop\mobile-money\src\controllers\vaultController.ts
+  3:40  warning  'VaultTransferInput' is defined but never used  @typescript-eslint/no-unused-vars
+  4:23  warning  'LockKeys' is defined but never used            @typescript-eslint/no-unused-vars
+
+C:\Users\SWAYY\Desktop\mobile-money\src\crypto\hsm.ts
+   34:3   warning  'hash' is defined but never used                                          @typescript-eslint/no-unused-vars
+  503:14  warning  'txHash' is defined but never used. Allowed unused args must match /^_/u  @typescript-eslint/no-unused-vars
+
+C:\Users\SWAYY\Desktop\mobile-money\src\crypto\zkBalanceProof.ts
+  42:1   warning  Unused eslint-disable directive (no problems were reported from '@typescript-eslint/no-var-requires')
+  43:18  error    A `require()` style import is forbidden                                                                @typescript-eslint/no-require-imports
+
+C:\Users\SWAYY\Desktop\mobile-money\src\index.ts
+   12:8   warning  'https' is defined but never used               @typescript-eslint/no-unused-vars
+   39:10  warning  'statementsRoutes' is defined but never used    @typescript-eslint/no-unused-vars
+   41:8   warning  'stellarRoutes' is defined but never used       @typescript-eslint/no-unused-vars
+   42:8   warning  'htlcRoutes' is defined but never used          @typescript-eslint/no-unused-vars
+   44:10  warning  'vaultRoutes' is defined but never used         @typescript-eslint/no-unused-vars
+   47:10  warning  'makerCheckerRoutes' is defined but never used  @typescript-eslint/no-unused-vars
+   49:10  warning  'auditRoutes' is defined but never used         @typescript-eslint/no-unused-vars
+  298:12  warning  'err' is defined but never used                 @typescript-eslint/no-unused-vars
+  310:12  warning  'err' is defined but never used                 @typescript-eslint/no-unused-vars
+
+C:\Users\SWAYY\Desktop\mobile-money\src\jobs\accountMerge.ts
+    2:10  warning  'getNetworkPassphrase' is defined but never used  @typescript-eslint/no-unused-vars
+    2:32  warning  'getStellarServer' is defined but never used      @typescript-eslint/no-unused-vars
+    3:10  warning  'addAccountMergeJob' is defined but never used    @typescript-eslint/no-unused-vars
+  132:10  warning  'getNativeBalance' is defined but never used      @typescript-eslint/no-unused-vars
+  141:10  warning  'hasNonNativeBalances' is defined but never used  @typescript-eslint/no-unused-vars
+  150:16  warning  'fetchLastActivityAt' is defined but never used   @typescript-eslint/no-unused-vars
+  165:10  warning  'isNotFoundError' is defined but never used       @typescript-eslint/no-unused-vars
+
+C:\Users\SWAYY\Desktop\mobile-money\src\jobs\balanceMonitorJob.ts
+  1:13  warning  'StellarSdk' is defined but never used  @typescript-eslint/no-unused-vars
+
+C:\Users\SWAYY\Desktop\mobile-money\src\jobs\kycTierUpgradeJob.ts
+  22:7  error  The value assigned to 'scanned' is not used in subsequent statements  no-useless-assignment
+
+C:\Users\SWAYY\Desktop\mobile-money\src\jobs\scheduler.ts
+   7:10  warning  'runDisputeSlaJob' is defined but never used          @typescript-eslint/no-unused-vars
+  15:10  warning  'runKycTierUpgradeJob' is defined but never used      @typescript-eslint/no-unused-vars
+  16:10  warning  'runLiquidityRebalanceJob' is defined but never used  @typescript-eslint/no-unused-vars
+  17:10  warning  'runCrossChainMonitorJob' is defined but never used   @typescript-eslint/no-unused-vars
+
+C:\Users\SWAYY\Desktop\mobile-money\src\jobs\sep31MonitorJob.ts
+  13:9  warning  'transactionModel' is assigned a value but never used  @typescript-eslint/no-unused-vars
+
+C:\Users\SWAYY\Desktop\mobile-money\src\jobs\staleTransactionWatchdog.ts
+  47:9  warning  'mobileMoneyService' is assigned a value but never used  @typescript-eslint/no-unused-vars
+  50:7  error    'expired' is never reassigned. Use 'const' instead       prefer-const
+
+C:\Users\SWAYY\Desktop\mobile-money\src\middleware\apiVersion.ts
+  1:19  warning  'Response' is defined but never used      @typescript-eslint/no-unused-vars
+  1:29  warning  'NextFunction' is defined but never used  @typescript-eslint/no-unused-vars
+
+C:\Users\SWAYY\Desktop\mobile-money\src\middleware\fraudDetection.ts
+  3:23  warning  'TransactionStatus' is defined but never used  @typescript-eslint/no-unused-vars
+
+C:\Users\SWAYY\Desktop\mobile-money\src\middleware\mtnCallbackSignature.ts
+  73:9   warning  'headerPresent' is assigned a value but never used  @typescript-eslint/no-unused-vars
+  92:12  warning  'error' is defined but never used                   @typescript-eslint/no-unused-vars
+
+C:\Users\SWAYY\Desktop\mobile-money\src\middleware\rbac.ts
+  164:11  error    'checkOwn' is never reassigned. Use 'const' instead  prefer-const
+  164:11  warning  'checkOwn' is assigned a value but never used        @typescript-eslint/no-unused-vars
+  188:14  warning  'error' is defined but never used                    @typescript-eslint/no-unused-vars
+  229:14  warning  'error' is defined but never used                    @typescript-eslint/no-unused-vars
+  248:14  warning  'error' is defined but never used                    @typescript-eslint/no-unused-vars
+  270:12  warning  'error' is defined but never used                    @typescript-eslint/no-unused-vars
+
+C:\Users\SWAYY\Desktop\mobile-money\src\middleware\readReplicaRouting.ts
+  30:3  error  ES2015 module syntax is preferred over namespaces  @typescript-eslint/no-namespace
+
+C:\Users\SWAYY\Desktop\mobile-money\src\middleware\twoFactor.ts
+  67:15  warning  'backupCodes' is assigned a value but never used  @typescript-eslint/no-unused-vars
+
+C:\Users\SWAYY\Desktop\mobile-money\src\models\adminStellarKey.ts
+  1:10  warning  'pool' is defined but never used  @typescript-eslint/no-unused-vars
+
+C:\Users\SWAYY\Desktop\mobile-money\src\models\amlAlert.ts
+    6:3   warning  'AMLRuleHit' is defined but never used                                   @typescript-eslint/no-unused-vars
+  164:40  error    The value assigned to 'paramIndex' is not used in subsequent statements  no-useless-assignment
+
+C:\Users\SWAYY\Desktop\mobile-money\src\models\complianceDocument.ts
+  165:42  error  The value assigned to 'paramIndex' is not used in subsequent statements  no-useless-assignment
+
+C:\Users\SWAYY\Desktop\mobile-money\src\models\contact.ts
+  1:10  warning  'pool' is defined but never used  @typescript-eslint/no-unused-vars
+
+C:\Users\SWAYY\Desktop\mobile-money\src\models\dispute.ts
+    1:10  warning  'pool' is defined but never used                                       @typescript-eslint/no-unused-vars
+  335:42  error    The value assigned to 'paramIdx' is not used in subsequent statements  no-useless-assignment
+  555:41  error    The value assigned to 'paramIdx' is not used in subsequent statements  no-useless-assignment
+
+C:\Users\SWAYY\Desktop\mobile-money\src\models\ledger.ts
+  1:16  warning  'QueryResult' is defined but never used  @typescript-eslint/no-unused-vars
+
+C:\Users\SWAYY\Desktop\mobile-money\src\models\reconciliation.ts
+  83:35  error  The value assigned to 'i' is not used in subsequent statements  no-useless-assignment
+
+C:\Users\SWAYY\Desktop\mobile-money\src\models\referral.ts
+  1:10  warning  'pool' is defined but never used  @typescript-eslint/no-unused-vars
+
+C:\Users\SWAYY\Desktop\mobile-money\src\models\transaction.ts
+   1:10  warning  'pool' is defined but never used                       @typescript-eslint/no-unused-vars
+  41:7   warning  'MAX_NOTES_LENGTH' is assigned a value but never used  @typescript-eslint/no-unused-vars
+
+C:\Users\SWAYY\Desktop\mobile-money\src\models\vault.ts
+  391:13  warning  'transactionModel' is assigned a value but never used  @typescript-eslint/no-unused-vars
+
+C:\Users\SWAYY\Desktop\mobile-money\src\queue\accountMergeWorker.ts
+  278:13  warning  'errorMessage' is assigned a value but never used  @typescript-eslint/no-unused-vars
+
+C:\Users\SWAYY\Desktop\mobile-money\src\queue\batchPayoutWorker.ts
+  35:10  warning  'getErrorMessage' is defined but never used  @typescript-eslint/no-unused-vars
+
+C:\Users\SWAYY\Desktop\mobile-money\src\queue\config.ts
+  2:10  warning  'redisClient' is defined but never used  @typescript-eslint/no-unused-vars
+
+C:\Users\SWAYY\Desktop\mobile-money\src\queue\index.ts
+  3:23  warning  'transactionWorker' is defined but never used          @typescript-eslint/no-unused-vars
+  5:3   warning  'providerBalanceAlertQueue' is defined but never used  @typescript-eslint/no-unused-vars
+
+C:\Users\SWAYY\Desktop\mobile-money\src\queue\transactionQueue.ts
+  32:3  warning  'options' is defined but never used. Allowed unused args must match /^_/u  @typescript-eslint/no-unused-vars
+
+C:\Users\SWAYY\Desktop\mobile-money\src\queue\worker.ts
+    1:21  warning  'AmqpMessage' is defined but never used                                @typescript-eslint/no-unused-vars
+   15:10  warning  'capturePersistentFailure' is defined but never used                   @typescript-eslint/no-unused-vars
+   45:16  warning  'sendTransactionEmail' is defined but never used                       @typescript-eslint/no-unused-vars
+   61:16  warning  'sendFailureEmail' is defined but never used                           @typescript-eslint/no-unused-vars
+   81:16  warning  'sendTransactionPush' is defined but never used                        @typescript-eslint/no-unused-vars
+  1

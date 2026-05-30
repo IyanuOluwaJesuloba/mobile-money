@@ -36,17 +36,11 @@ import { transactionDisputeRoutes, disputeRoutes } from "./routes/disputes";
 import { statsRoutes } from "./routes/stats";
 import { contactsRoutes } from "./routes/contacts";
 import { reportsRoutes } from "./routes/reports";
-import { statementsRoutes } from "./routes/statements";
 import feesRoutes from "./routes/fees";
-import stellarRoutes from "./routes/stellar";
-import htlcRoutes from "./routes/htlc";
 import { createKYCRoutes } from "./routes/kycRoutes";
-import { vaultRoutes } from "./routes/vaults";
 import { adminRoutes } from "./routes/admin";
 import kycTierUpgradeRoutes from "./routes/kycTierUpgradeRoutes";
-import { makerCheckerRoutes } from "./routes/makerChecker";
 import { userRoutes } from "./routes/users";
-import { auditRoutes } from "./routes/audit";
 import { errorHandler } from "./middleware/errorHandler";
 import {
   connectRedis,
@@ -74,6 +68,7 @@ import { HealthCheckResponse, ReadinessCheckResponse } from "./types/api";
 import { privacyRoutes } from "./routes/privacy";
 import { developerDashboardRoutes } from "./routes/developerDashboard";
 import { travelRuleRoutes } from "./routes/travelRule";
+import subscriptionsRoutes from "./routes/subscriptions";
 import mtnCallbacksRouter from "./routes/mtnCallbacks";
 import sep31Router from "./stellar/sep31";
 import sep24Router from "./stellar/sep24";
@@ -89,6 +84,7 @@ import reconciliationRoutes from "./routes/reconciliation";
 import exchangeRateBufferRoutes from "./routes/exchangeRateBuffers";
 import adminAssetRoutes from "./routes/admin/assets";
 import settingsRoutes from "./routes/settings";
+import merchantWebhooksRouter from "./routes/merchantWebhooks";
 
 
 
@@ -378,6 +374,10 @@ app.use("/api/reconciliation", reconciliationRoutes);
 app.use("/api/exchange-rate-buffers", exchangeRateBufferRoutes);
 app.use("/api/admin/assets", adminAssetRoutes);
 app.use("/api/settings", settingsRoutes);
+app.use("/api/merchant/webhooks", merchantWebhooksRouter);
+
+// Subscriptions management
+app.use("/api/subscriptions", subscriptionsRoutes);
 
 
 

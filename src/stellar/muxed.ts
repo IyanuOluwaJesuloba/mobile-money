@@ -142,3 +142,37 @@ export function routePayment(destinationAddress: string): {
     userId: info.id,
   };
 }
+
+/**
+ * Resolve any Stellar address (G- or M-) to its base G-address.
+ * 
+ * - For G-addresses, returns the address unchanged.
+ * - For M-addresses, extracts and returns the underlying G-address.
+ * - Throws an Error if the address is invalid.
+ */
+export function resolveToBaseAddress(address: string): string {
+  if (!address || typeof address !== "string") {
+    throw new Error("Invalid address: must be a non-empty string");
+  }
+
+  // If it's a muxed address, extract the base address
+  if (isMuxedAddress(address)) {
+    try {
+      const muxed = StellarSdk.MuxedAccount.fromAddress(address, "0");
+      return muxed.baseAccount().accountId();
+    } catch (error) {
+      throw new Error(
+        `Failed to resolve muxed address: ${
+          error instanceof Error ? error.message : "unknown error"
+        }`,
+      );
+    }
+  }
+
+  // Validate that it's a valid G-address
+  if (!StellarSdk.StrKey.isValidEd25519PublicKey(address)) {
+    throw new Error(`Invalid Stellar address: "${address}"`);
+  }
+
+  return address;
+}

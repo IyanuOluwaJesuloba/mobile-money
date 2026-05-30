@@ -37,7 +37,7 @@ jobs:
 
       - name: Run root npm audit for high vulnerabilities
         run: npm run audit:high
-        continue-on-error: true
+        continue-on-error: false
 
       - name: Check if Snyk is configured
         id: check_snyk
@@ -57,7 +57,7 @@ jobs:
       - name: Run root Snyk test for high vulnerabilities
         if: steps.check_snyk.outputs.snyk_available == 'true'
         run: npm run snyk:test:high
-        continue-on-error: true
+        continue-on-error: false
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
 
@@ -78,13 +78,13 @@ jobs:
       - name: Run bridge-starter-node npm audit for high vulnerabilities
         working-directory: bridge-starter-node
         run: npm run audit:high
-        continue-on-error: true
+        continue-on-error: false
 
       - name: Run bridge-starter-node Snyk test for high vulnerabilities
         if: steps.check_snyk.outputs.snyk_available == 'true'
         working-directory: bridge-starter-node
         run: npm run snyk:test:high
-        continue-on-error: true
+        continue-on-error: false
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
 
@@ -146,18 +146,18 @@ jobs:
 
       - name: Run database migrations
         run: npm run migrate:up
-        continue-on-error: true
+        continue-on-error: false
         env:
           DATABASE_URL: postgresql://test_user:test_password@localhost:5432/test_db
 
       - name: Run linter
         run: npm run lint
-        continue-on-error: true
+        continue-on-error: false
 
       - name: Run tests with coverage
         run: npm run test:coverage -- --maxWorkers=2 --forceExit
         timeout-minutes: 10
-        continue-on-error: true
+        continue-on-error: false
         env:
           DATABASE_URL: postgresql://test_user:test_password@localhost:5432/test_db
           REDIS_URL: redis://localhost:6379
@@ -170,7 +170,7 @@ jobs:
 
       - name: Build for E2E
         run: npm run build
-        continue-on-error: true
+        continue-on-error: false
 
       - name: Start server for E2E
         run: node dist/src/index.js &
@@ -185,11 +185,11 @@ jobs:
 
       - name: Wait for server to be ready
         run: npx wait-on http://127.0.0.1:3000/health --timeout 30000
-        continue-on-error: true
+        continue-on-error: false
 
       - name: Run Playwright e2e tests
         run: npx playwright test --project=chromium --workers=1 --retries=1 --reporter=dot
-        continue-on-error: true
+        continue-on-error: false
         env:
           E2E_BASE_URL: http://127.0.0.1:3000
           DATABASE_URL: postgresql://test_user:test_password@localhost:5432/test_db
@@ -245,11 +245,11 @@ jobs:
 
       - name: Build
         run: npm run build
-        continue-on-error: true
+        continue-on-error: false
 
       - name: Check build artifacts
         run: ls -la dist/
-        continue-on-error: true
+        continue-on-error: false
 
   # Docker build job - optional, only runs if secrets are configured
   # To enable: Add REGISTRY_USERNAME and REGISTRY_PASSWORD to repository secrets

@@ -8,6 +8,7 @@ import { runDisputeSlaJob } from "./disputeSlaJob";
 import { runBalanceMonitorJob } from "./balanceMonitorJob";
 import { runSep31MonitorJob } from "./sep31MonitorJob";
 import { runFeeBumpJob } from "./feeBumpJob";
+import { runSep31FeeBumpJob } from "./sep31FeeBumpJob";
 import { MonitoringService } from "../services/monitoringService";
 import { createPagerDutyService } from "../services/pagerDutyService";
 import { runProviderBalanceAlertJob } from "./balances";
@@ -17,6 +18,11 @@ import { runLiquidityRebalanceJob } from "./liquidityRebalanceJob";
 import { runCrossChainMonitorJob } from "./crossChainMonitorJob";
 import { runDailyProviderReconciliation } from "./providerReconciliationJob";
 import { runReconciliationJob } from "./reconciliationJob";
+import {
+  INDEX_REINDEX_CRON,
+  INDEX_REINDEX_JOB_ENABLED,
+} from "../config/env";
+import { runIndexReindexJob } from "./indexReindexJob";
 
 
 interface JobConfig {
@@ -69,6 +75,12 @@ const JOBS: JobConfig[] = [
     handler: runFeeBumpJob,
   },
   {
+    name: "sep31-fee-bump",
+    // Every 30 seconds - bumps fees for stuck SEP-31 transactions
+    schedule: process.env.SEP31_FEE_BUMP_CRON || "*/30 * * * * *",
+    handler: runSep31FeeBumpJob,
+  },
+  {
     name: "provider-balance-alert",
     // Every 10 minutes - checks MTN/Airtel operational balances and alerts treasury when low
     schedule: process.env.PROVIDER_BALANCE_ALERT_CRON || "*/10 * * * *",
@@ -91,6 +103,25 @@ const JOBS: JobConfig[] = [
     // 1st of every month at midnight
     schedule: "0 0 1 * *",
     handler: runMonthlyInvoiceJob,
+  },
+  ...(INDEX_REINDEX_JOB_ENABLED
+    ? [
+        {
+          name: "index-reindex",
+          // Daily at 3:00 AM by default - reindexes bloated indexes during low traffic
+          schedule: INDEX_REINDEX_CRON,
+          handler: runIndexReindexJob,
+        },
+      ]
+    : []),
+  {
+    name: "subscriptions",
+    // Default: run every minute to pick up due subscriptions
+    schedule: process.env.SUBSCRIPTION_CRON || "*/1 * * * *",
+    handler: async () => {
+      const { runSubscriptionJob } = await import("./subscriptionJob");
+      return runSubscriptionJob();
+    },
   },
   {
     name: "reconciliation",

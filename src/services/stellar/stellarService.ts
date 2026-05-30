@@ -4,6 +4,7 @@ import dotenv from "dotenv";
 import { transactionTotal, transactionErrorsTotal } from "../../utils/metrics";
 import { AssetService, getConfiguredPaymentAsset } from "./assetService";
 import { sanctionService } from "../sanctionService";
+import { resolveToBaseAddress } from "../../stellar/muxed";
 
 dotenv.config();
 
@@ -126,15 +127,47 @@ export class StellarService {
     submittedAt?: Date;
   }> {
     try {
+      // Resolve destination address (handle both G and M addresses)
+      let resolvedDestinationAddress: string;
+      try {
+        resolvedDestinationAddress = resolveToBaseAddress(destinationAddress);
+      } catch (error) {
+        throw new Error(
+          `Invalid destination address: ${error instanceof Error ? error.message : "unknown error"}`,
+        );
+      }
+
       // Pre-flight sanction screening — blocks both sender and receiver
       if (senderName && receiverName) {
         await sanctionService.checkParties(senderName, receiverName);
       }
 
+      // If address-based screening is preferred, use checkPartiesByAddress
+      // This resolves muxed accounts and screens by the base address
+      if (this.issuerKeypair) {
+        const senderAddress = this.issuerKeypair.publicKey();
+        try {
+          await sanctionService.checkPartiesByAddress(
+            senderAddress,
+            resolvedDestinationAddress,
+            senderName,
+            receiverName,
+          );
+        } catch (error) {
+          // If it's a SanctionScreeningError, re-throw it
+          if (error instanceof Error && error.name === "SanctionScreeningError") {
+            throw error;
+          }
+          // Log other errors but don't fail if address validation fails
+          // (this maintains backward compatibility)
+          console.warn("Address-based sanction screening warning:", error);
+        }
+      }
+
       // MOCK MODE (no crash)
       if (this.isMockMode || !this.issuerKeypair) {
         console.log("Mock Stellar payment:", {
-          to: destinationAddress,
+          to: resolvedDestinationAddress,
           amount,
         });
 
@@ -151,7 +184,7 @@ export class StellarService {
       const paymentAsset = getConfiguredPaymentAsset();
       if (!paymentAsset.isNative()) {
         const trusted = await this.assetService.hasTrustline(
-          destinationAddress,
+          resolvedDestinationAddress,
           paymentAsset,
         );
         if (!trusted) {
@@ -171,7 +204,7 @@ export class StellarService {
       })
         .addOperation(
           StellarSdk.Operation.payment({
-            destination: destinationAddress,
+            destination: resolvedDestinationAddress,
             asset: paymentAsset,
             amount: amount,
           }),
@@ -383,18 +416,29 @@ export class StellarService {
   async executeClawback(
     fromAddress: string,
     amount: string,
+    adminId?: string,
   ): Promise<{ hash?: string }> {
+    // Validate inputs
+    if (!fromAddress || fromAddress.length < 56) {
+      throw new Error("Invalid destination address format");
+    }
+    if (parseFloat(amount) <= 0) {
+      throw new Error("Clawback amount must be positive");
+    }
+
+    // Check if trying to claw back native XLM (not allowed)
+    const paymentAsset = getConfiguredPaymentAsset();
+    if (paymentAsset.isNative()) {
+      throw new Error("Cannot claw back native XLM");
+    }
+
     if (this.isMockMode || !this.issuerKeypair) {
       console.log("Mock Stellar clawback:", { fromAddress, amount });
+      await this.logClawbackToAudit("mock_clawback_hash", fromAddress, amount, adminId, true);
       return { hash: "mock_clawback_hash" };
     }
 
     try {
-      const paymentAsset = getConfiguredPaymentAsset();
-      if (paymentAsset.isNative()) {
-        throw new Error("Cannot claw back native XLM");
-      }
-
       const account = await this.server.loadAccount(
         this.issuerKeypair.publicKey(),
       );
@@ -416,10 +460,54 @@ export class StellarService {
       const response = await this.server.submitTransaction(transaction);
       console.log("Stellar clawback successful", { hash: response.hash });
 
+      // Log to audit trail
+      await this.logClawbackToAudit(response.hash, fromAddress, amount, adminId, true);
+
       return { hash: response.hash };
     } catch (error) {
       console.error("Stellar clawback failed:", error);
+      // Log failed attempt
+      await this.logClawbackToAudit(null, fromAddress, amount, adminId, false, error);
       throw error;
+    }
+  }
+
+  /**
+   * Logs clawback operation to audit trail
+   */
+  private async logClawbackToAudit(
+    txHash: string | null,
+    fromAddress: string,
+    amount: string,
+    adminId?: string,
+    success: boolean = true,
+    error?: any,
+  ): Promise<void> {
+    try {
+      const { pool } = await import("../../config/database");
+      
+      const auditData = {
+        transaction_hash: txHash,
+        from_address: fromAddress,
+        amount: amount,
+        success: success,
+        error_message: error ? (error.message || String(error)) : null,
+      };
+
+      await pool.query(
+        `INSERT INTO audit_logs (admin_id, action, resource, resource_id, diff, created_at)
+         VALUES ($1, $2, $3, $4, $5, NOW())`,
+        [
+          adminId || "system",
+          "CLAWBACK_ASSET",
+          "stellar_clawback",
+          txHash || "failed",
+          JSON.stringify(auditData),
+        ]
+      );
+    } catch (auditError) {
+      console.error("Failed to write clawback audit log:", auditError);
+      // Don't throw - audit logging failure shouldn't break the operation
     }
   }
 }

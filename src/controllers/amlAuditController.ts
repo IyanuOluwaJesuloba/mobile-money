@@ -363,7 +363,7 @@ export const markAlertForSAR = async (
 ): Promise<void> => {
   try {
     const { alertId } = req.params;
-    const { generateSAR } = require("../compliance/sar");
+    const { generateSAR } = await import("../compliance/sar");
 
     const alert = await amlAlertModel.findById(alertId);
     if (!alert) {

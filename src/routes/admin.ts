@@ -2625,4 +2625,62 @@ router.delete(
   },
 );
 
+router.get(
+  "/ledger/accounts/:accountCode/entries",
+  requireAdmin,
+  rateLimitListQueries,
+  async (req: Request, res: Response) => {
+    try {
+      const limit = Number(req.query.limit) || 100;
+      const cursor =
+        typeof req.query.cursor === "string" ? req.query.cursor : undefined;
+      const startDate =
+        typeof req.query.startDate === "string"
+          ? new Date(req.query.startDate)
+          : undefined;
+      const endDate =
+        typeof req.query.endDate === "string"
+          ? new Date(req.query.endDate)
+          : undefined;
+
+      if (startDate && Number.isNaN(startDate.getTime())) {
+        return res.status(400).json({ message: "Invalid startDate" });
+      }
+
+      if (endDate && Number.isNaN(endDate.getTime())) {
+        return res.status(400).json({ message: "Invalid endDate" });
+      }
+
+      const page = await ledgerService.getEntriesByAccountPage(
+        req.params.accountCode,
+        {
+          startDate,
+          endDate,
+          limit,
+          cursor,
+        },
+      );
+
+      res.json({
+        entries: page.entries,
+        pagination: {
+          limit: page.limit,
+          nextCursor: page.nextCursor,
+          hasMore: page.hasMore,
+        },
+      });
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        error.message === "Invalid ledger entry cursor"
+      ) {
+        return res.status(400).json({ message: error.message });
+      }
+
+      console.error("[ledger:entries]", error);
+      res.status(500).json({ message: "Failed to fetch ledger entries" });
+    }
+  },
+);
+
 export { router as adminRoutes };

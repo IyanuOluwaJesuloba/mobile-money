@@ -1,5 +1,6 @@
 import { pool } from "../config/database";
 import axios from "axios";
+import { resolveToBaseAddress, isMuxedAddress } from "../stellar/muxed";
 
 export interface SanctionEntity {
   name: string;
@@ -180,6 +181,71 @@ export class SanctionService {
         throw new SanctionScreeningError(
           role,
           name,
+          top.entity.name,
+          top.score,
+          top.entity.source,
+        );
+      }
+    }
+  }
+
+  /**
+   * Screens both sender and receiver addresses against the sanction list.
+   * Resolves muxed accounts (M-addresses) to their underlying base addresses (G-addresses).
+   * Throws SanctionScreeningError immediately on the first hit.
+   * Throws Error if either address is invalid.
+   */
+  async checkPartiesByAddress(
+    senderAddress: string,
+    receiverAddress: string,
+    senderName?: string,
+    receiverName?: string,
+  ): Promise<void> {
+    // Resolve muxed addresses to base addresses
+    let resolvedSenderAddress: string;
+    let resolvedReceiverAddress: string;
+
+    try {
+      resolvedSenderAddress = resolveToBaseAddress(senderAddress);
+    } catch (error) {
+      throw new Error(
+        `Invalid sender address: ${error instanceof Error ? error.message : "unknown error"}`,
+      );
+    }
+
+    try {
+      resolvedReceiverAddress = resolveToBaseAddress(receiverAddress);
+    } catch (error) {
+      throw new Error(
+        `Invalid receiver address: ${error instanceof Error ? error.message : "unknown error"}`,
+      );
+    }
+
+    // Screen resolved addresses (use provided names if available, otherwise use addresses as identifier)
+    const parties: Array<{
+      address: string;
+      screeningId: string;
+      role: "sender" | "receiver";
+    }> = [
+      {
+        address: resolvedSenderAddress,
+        screeningId: senderName || resolvedSenderAddress,
+        role: "sender",
+      },
+      {
+        address: resolvedReceiverAddress,
+        screeningId: receiverName || resolvedReceiverAddress,
+        role: "receiver",
+      },
+    ];
+
+    for (const { screeningId, role } of parties) {
+      const matches = await this.searchSanctions(screeningId);
+      if (matches.length > 0) {
+        const top = matches[0];
+        throw new SanctionScreeningError(
+          role,
+          screeningId,
           top.entity.name,
           top.score,
           top.entity.source,
