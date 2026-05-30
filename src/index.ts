@@ -1,5 +1,5 @@
 // Initialize centralized configuration first
-import './config/init';
+import "./config/init";
 
 import "./tracer";
 import path from "path";

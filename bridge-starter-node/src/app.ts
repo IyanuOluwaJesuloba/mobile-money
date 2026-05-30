@@ -4,7 +4,14 @@ import { config } from "./config/env";
 
 const app = express();
 
-app.use(express.json());
+// Preserve raw request body buffer for signature verification middleware.
+app.use(
+  express.json({
+    verify: (req: any, _res, buf: Buffer) => {
+      req.rawBody = buf;
+    },
+  }),
+);
 
 app.get("/", (req: Request, res: Response) => {
   res.send("Bridge Starter API running 🚀");

@@ -17,6 +17,7 @@ import './schemas/fees';
 import './schemas/kyc';
 import './schemas/htlc';
 import './schemas/prices';
+import './schemas/sep38';
 
 // ── Path registrations ────────────────────────────────────────────────────────
 import './paths/auth';
@@ -27,6 +28,7 @@ import './paths/fees';
 import './paths/kyc';
 import './paths/htlc';
 import './paths/prices';
+import './paths/sep38';
 
 import { OpenApiGeneratorV3 } from '@asteasolutions/zod-to-openapi';
 import { registry } from './registry';
@@ -66,6 +68,7 @@ export function generateOpenAPIDocument(): Record<string, unknown> {
       { name: 'KYC', description: 'Know Your Customer identity verification' },
       { name: 'HTLC', description: 'Hash Time-Locked Contracts on Stellar' },
       { name: 'Prices', description: 'Historical price data' },
+      { name: 'SEP-38 Quotes', description: 'SEP-38 Quote & Price Stream protocol — firm quotes locked in Redis' },
     ],
   }) as unknown as Record<string, unknown>;
 }
