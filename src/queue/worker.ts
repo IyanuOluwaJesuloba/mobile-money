@@ -8,20 +8,73 @@ import { TransactionModel, TransactionStatus } from "../models/transaction";
 import { MobileMoneyService } from "../services/mobilemoney/mobileMoneyService";
 import { StellarService } from "../services/stellar/stellarService";
 import { UserModel } from "../models/users";
+import { EmailService } from "../services/email";
 import { withRetry } from "../services/retry";
 import { notifyTransactionWebhook, WebhookService } from "../services/webhook";
 import { smsService } from "../services/sms";
 import { notificationRouter } from "../services/notificationRouter";
+import { pushNotificationService } from "../services/push";
 import { capturePersistentFailure } from "./dlq";
-import { queryRead } from "../config/database";
+import { queryRead, queryWrite } from "../config/database";
+import subscriptionModel from "../models/subscription";
 import logger from "../utils/logger";
 const transactionModel = new TransactionModel();
 const mobileMoneyService = new MobileMoneyService();
 const stellarService = new StellarService();
 const userModel = new UserModel();
+const emailService = new EmailService();
+const pushService = pushNotificationService;
 const webhookService = new WebhookService();
 
 const CONCURRENCY = 5;
+
+export async function handleSubscriptionFailure(
+  subscriptionId: string,
+  transactionId: string | null,
+  error: unknown,
+  log = logger,
+) {
+  try {
+    const sub = await subscriptionModel.getById(subscriptionId);
+    const attemptRow = await subscriptionModel.incrementRetry(subscriptionId);
+    const attemptNumber = attemptRow ? attemptRow.retry_count : 1;
+    await subscriptionModel.recordAttempt(subscriptionId, transactionId, attemptNumber, "failed", getErrorMessage(error));
+
+    if (attemptRow && attemptRow.retry_count >= attemptRow.max_retries) {
+      await subscriptionModel.pause(subscriptionId);
+      log.warn({ subscriptionId }, "Subscription paused after max retries");
+      try {
+        const merchant = await userModel.findById(sub.merchant_id);
+        await notificationRouter.routeSystemNotification(
+          "high",
+          "subscription",
+          "Subscription Paused",
+          `Subscription ${subscriptionId} paused after ${attemptRow.retry_count} failed attempts`,
+          { subscriptionId, merchantId: sub.merchant_id },
+        );
+        if (merchant?.email) {
+          await emailService.sendEmail({
+            to: merchant.email,
+            templateId: process.env.SENDGRID_GENERAL_TEMPLATE_ID || "",
+            dynamicTemplateData: {
+              title: "Subscription Paused",
+              message: `Your subscription (${subscriptionId}) has been paused after ${attemptRow.retry_count} failed attempts. Please review and resume if required.`,
+            },
+          });
+        }
+      } catch (notifyErr) {
+        log.error({ notifyErr }, "Failed to notify merchant about subscription pause");
+      }
+    } else if (attemptRow) {
+      const base = attemptRow.retry_backoff_seconds || 600;
+      const delay = base * Math.pow(2, Math.max(0, attemptRow.retry_count - 1));
+      await queryWrite(`UPDATE subscriptions SET next_run_at = NOW() + ($1 || ' seconds')::interval, updated_at = NOW() WHERE id = $2`, [delay, subscriptionId]);
+      log.info({ subscriptionId, delay }, "Scheduled subscription retry");
+    }
+  } catch (ex) {
+    log.error({ ex }, "handleSubscriptionFailure failed");
+  }
+}
 
 function getErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "Unknown error";
@@ -381,6 +434,17 @@ async function processTransaction(data: TransactionJobData): Promise<Transaction
       status: "failed",
       error: getErrorMessage(error)
     });
+
+    // If this transaction was created by a subscription, record attempt and schedule retry if configured
+    try {
+      const tx = await transactionModel.findById(transactionId);
+      const subscriptionId = (tx?.metadata && (tx.metadata.subscription_id || tx.metadata.subscriptionId)) || null;
+      if (subscriptionId) {
+        await handleSubscriptionFailure(subscriptionId, transactionId, error, log);
+      }
+    } catch (subErr) {
+      log.error({ subErr }, "Failed to record subscription retry info");
+    }
 
     // TODO: commented out because I couldn't find the job variable so to clear `rebase/merge` error
     // if (job) {

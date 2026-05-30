@@ -74,6 +74,7 @@ import { HealthCheckResponse, ReadinessCheckResponse } from "./types/api";
 import { privacyRoutes } from "./routes/privacy";
 import { developerDashboardRoutes } from "./routes/developerDashboard";
 import { travelRuleRoutes } from "./routes/travelRule";
+import subscriptionsRoutes from "./routes/subscriptions";
 import mtnCallbacksRouter from "./routes/mtnCallbacks";
 import sep31Router from "./stellar/sep31";
 import sep24Router from "./stellar/sep24";
@@ -378,6 +379,9 @@ app.use("/api/reconciliation", reconciliationRoutes);
 app.use("/api/exchange-rate-buffers", exchangeRateBufferRoutes);
 app.use("/api/admin/assets", adminAssetRoutes);
 app.use("/api/settings", settingsRoutes);
+
+// Subscriptions management
+app.use("/api/subscriptions", subscriptionsRoutes);
 
 
 

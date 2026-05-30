@@ -108,6 +108,15 @@ const JOBS: JobConfig[] = [
       ]
     : []),
   {
+    name: "subscriptions",
+    // Default: run every minute to pick up due subscriptions
+    schedule: process.env.SUBSCRIPTION_CRON || "*/1 * * * *",
+    handler: async () => {
+      const { runSubscriptionJob } = await import("./subscriptionJob");
+      return runSubscriptionJob();
+    },
+  },
+  {
     name: "reconciliation",
     // Daily at 5:00 AM
     schedule: process.env.RECONCILIATION_CRON || "0 5 * * *",
