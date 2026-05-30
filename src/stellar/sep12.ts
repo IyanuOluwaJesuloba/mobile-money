@@ -4,6 +4,7 @@ import { sep12RateLimiter } from "../middleware/rateLimit";
 import { upload } from "../middleware/upload";
 import { z } from "zod";
 import KYCService, { KYCLevel, KYCStatus, DocumentType } from "../services/kyc";
+import { UserModel } from "../models/users";
 
 /**
  * SEP-12: KYC API
@@ -140,10 +141,12 @@ const PutCustomerSchema = z.object({
 export class Sep12Service {
   private kycService: KYCService;
   private db: Pool;
+  private userModel: UserModel;
 
   constructor(db: Pool) {
     this.db = db;
     this.kycService = new KYCService(db);
+    this.userModel = new UserModel();
   }
 
   /**
@@ -479,6 +482,15 @@ export class Sep12Service {
         
         await this.db.query(linkQuery, [userId, applicantId]);
       }
+
+      // Save sensitive fields in users table in encrypted form
+      await this.userModel.updateSensitiveData(userId, {
+        firstName: first_name,
+        lastName: last_name,
+        address: address,
+        dateOfBirth: birth_date,
+        idNumber: id_number,
+      });
 
       // Handle document uploads if provided
       if (photo_id_front) {

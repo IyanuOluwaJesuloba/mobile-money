@@ -128,7 +128,7 @@ export class AccountingService {
   ): Promise<AccountingConnection> {
     try {
       const tokenResponse = await this.exchangeQuickBooksCode(code);
-      
+
       const connection: AccountingConnection = {
         id: uuidv4(),
         userId,
@@ -155,7 +155,7 @@ export class AccountingService {
   ): Promise<AccountingConnection> {
     try {
       const tokenResponse = await this.exchangeXeroCode(code);
-      
+
       // Get tenant information
       const tenants = await this.getXeroTenants(tokenResponse.access_token);
       const tenantId = tenants[0]?.tenantId; // Use first tenant for simplicity
@@ -415,9 +415,8 @@ export class AccountingService {
 
       await this.ensureValidToken(connectionId);
 
-      // Get PnL data for the date
       const pnlData = await this.getPnLData(date);
-      
+
       if (connection.provider === AccountingProvider.QUICKBOOKS) {
         await this.syncPnLToQuickBooks(connection, pnlData, syncLog);
       } else if (connection.provider === AccountingProvider.XERO) {
@@ -457,9 +456,8 @@ export class AccountingService {
 
       await this.ensureValidToken(connectionId);
 
-      // Get fee revenue data for the date
       const feeData = await this.getFeeRevenueData(date);
-      
+
       if (connection.provider === AccountingProvider.QUICKBOOKS) {
         await this.syncFeeRevenueToQuickBooks(connection, feeData, syncLog);
       } else if (connection.provider === AccountingProvider.XERO) {
@@ -605,7 +603,6 @@ export class AccountingService {
   }
 
   private async getPnLData(date: string): Promise<PnLData> {
-    // Calculate PnL data from transactions
     const query = `
       SELECT 
         COUNT(*) as transactions,
@@ -629,7 +626,6 @@ export class AccountingService {
   }
 
   private async getFeeRevenueData(date: string): Promise<{ category: string; amount: number }[]> {
-    // Get fee revenue broken down by category
     const query = `
       SELECT 
         fee_category,
@@ -658,7 +654,6 @@ export class AccountingService {
     const connectionData = await this.getConnection(connection.id);
     const mappings = await this.getCategoryMappings(connection.id);
 
-    // Create journal entry for PnL
     const journalEntry = {
       TxnDate: pnlData.date,
       Line: [
@@ -668,7 +663,7 @@ export class AccountingService {
           DetailType: "JournalEntryLineDetail",
           JournalEntryLineDetail: {
             PostingType: "Credit",
-            AccountRef: this.getMappedCategory(mappings, "revenue") || { value: "1" }, // Default to Sales
+            AccountRef: this.getMappedCategory(mappings, "revenue") || { value: "1" },
           },
         },
         {
@@ -677,7 +672,7 @@ export class AccountingService {
           DetailType: "JournalEntryLineDetail",
           JournalEntryLineDetail: {
             PostingType: "Debit",
-            AccountRef: this.getMappedCategory(mappings, "fees") || { value: "4" }, // Default to Expense
+            AccountRef: this.getMappedCategory(mappings, "fees") || { value: "4" },
           },
         },
       ],
@@ -712,19 +707,18 @@ export class AccountingService {
     const connectionData = await this.getConnection(connection.id);
     const mappings = await this.getCategoryMappings(connection.id);
 
-    // Create manual journal entry for PnL
     const journalEntry = {
       Date: pnlData.date,
       JournalLines: [
         {
           Description: `Daily P&L - ${pnlData.date}`,
           CreditAmount: pnlData.revenue,
-          AccountID: this.getMappedCategory(mappings, "revenue") || "1", // Default to Sales
+          AccountID: this.getMappedCategory(mappings, "revenue") || "1",
         },
         {
           Description: `Daily Fees - ${pnlData.date}`,
           DebitAmount: pnlData.fees,
-          AccountID: this.getMappedCategory(mappings, "fees") || "4", // Default to Expense
+          AccountID: this.getMappedCategory(mappings, "fees") || "4",
         },
       ],
     };
@@ -836,6 +830,130 @@ export class AccountingService {
     }
   }
 
+  private async syncWithdrawalToXeroBill(
+    connection: AccountingConnection,
+    transaction: {
+      id: string;
+      userId: string;
+      type: string;
+      amount: number;
+      fee: number;
+      currency: string;
+      referenceNumber: string;
+      provider: string;
+      createdAt: Date;
+    },
+    mappings: CategoryMapping[]
+  ): Promise<void> {
+    const connectionData = await this.getConnection(connection.id);
+    const txnDate = transaction.createdAt.toISOString().split("T")[0];
+    const withdrawalAccountId = this.getMappedCategory(mappings, "withdrawal");
+    const feeAccountId = this.getMappedCategory(mappings, "fees");
+
+    const withdrawalLine: any = {
+      Description: `Withdrawal payout - ref:${transaction.referenceNumber} via ${transaction.provider}`,
+      Quantity: 1,
+      UnitAmount: transaction.amount,
+      TaxType: "NONE",
+    };
+
+    if (withdrawalAccountId) {
+      withdrawalLine.AccountID = withdrawalAccountId;
+    } else {
+      withdrawalLine.AccountCode = "500";
+    }
+
+    const lineItems: any[] = [withdrawalLine];
+
+    if (transaction.fee > 0) {
+      const feeLine: any = {
+        Description: `Fee - Withdrawal payout ref:${transaction.referenceNumber}`,
+        Quantity: 1,
+        UnitAmount: transaction.fee,
+        TaxType: "NONE",
+      };
+
+      if (feeAccountId) {
+        feeLine.AccountID = feeAccountId;
+      } else {
+        feeLine.AccountCode = "500";
+      }
+
+      lineItems.push(feeLine);
+    }
+
+    const bill = {
+      Type: "ACCPAY",
+      Contact: {
+        Name: "Mobile Money Payouts",
+      },
+      Date: txnDate,
+      DueDate: txnDate,
+      Reference: transaction.referenceNumber,
+      Status: "AUTHORISED",
+      LineItems: lineItems,
+    };
+
+    await axios.post(
+      "https://api.xero.com/api.xro/2.0/Bills",
+      { Bills: [bill] },
+      {
+        headers: {
+          Authorization: `Bearer ${connectionData!.accessToken}`,
+          "Xero-tenant-id": connectionData!.tenantId,
+          "Content-Type": "application/json",
+        },
+      }
+    );
+  }
+
+  private async syncXeroTransactionToManualJournal(
+    connection: AccountingConnection,
+    transaction: {
+      id: string;
+      userId: string;
+      type: string;
+      amount: number;
+      fee: number;
+      currency: string;
+      referenceNumber: string;
+      provider: string;
+      createdAt: Date;
+    }
+  ): Promise<void> {
+    const freshConnection = await this.getConnection(connection.id);
+    const txnDate = transaction.createdAt.toISOString().split("T")[0];
+    const description = `${transaction.type} - ref:${transaction.referenceNumber} via ${transaction.provider}`;
+
+    const journalLines: object[] = [
+      {
+        Description: description,
+        CreditAmount: transaction.amount,
+        AccountID: "revenue-account-id",
+      },
+    ];
+
+    if (transaction.fee > 0) {
+      journalLines.push({
+        Description: `Fee - ${description}`,
+        DebitAmount: transaction.fee,
+        AccountID: "expense-account-id",
+      });
+    }
+
+    await axios.put(
+      "https://api.xero.com/api.xro/2.0/ManualJournals",
+      { Date: txnDate, Narration: transaction.id, JournalLines: journalLines },
+      {
+        headers: {
+          Authorization: `Bearer ${freshConnection!.accessToken}`,
+          "Xero-tenant-id": freshConnection!.tenantId,
+          "Content-Type": "application/json",
+        },
+      }
+    );
+  }
+
   private getMappedCategory(mappings: CategoryMapping[], mobileMoneyCategory: string): string | null {
     const mapping = mappings.find(m => m.mobileMoneyCategory === mobileMoneyCategory);
     return mapping ? mapping.accountingCategoryId : null;
@@ -907,31 +1025,18 @@ export class AccountingService {
             }
           );
         } else if (connection.provider === AccountingProvider.XERO) {
-          const journalLines: object[] = [
-            {
-              Description: description,
-              CreditAmount: transaction.amount,
-              AccountID: "revenue-account-id", // overridden by category mapping if set
-            },
-          ];
-          if (transaction.fee > 0) {
-            journalLines.push({
-              Description: `Fee - ${description}`,
-              DebitAmount: transaction.fee,
-              AccountID: "expense-account-id",
-            });
-          }
-          await axios.put(
-            "https://api.xero.com/api.xro/2.0/ManualJournals",
-            { Date: txnDate, Narration: transaction.id, JournalLines: journalLines },
-            {
-              headers: {
-                Authorization: `Bearer ${fresh.accessToken}`,
-                "Xero-tenant-id": fresh.tenantId,
-                "Content-Type": "application/json",
-              },
+          if (transaction.type === "withdraw") {
+            const mappings = await this.getCategoryMappings(connection.id);
+            const withdrawalAccountId = this.getMappedCategory(mappings, "withdrawal");
+
+            if (withdrawalAccountId) {
+              await this.syncWithdrawalToXeroBill(fresh, transaction, mappings);
+            } else {
+              await this.syncXeroTransactionToManualJournal(fresh, transaction);
             }
-          );
+          } else {
+            await this.syncXeroTransactionToManualJournal(fresh, transaction);
+          }
         }
 
         await pool.query(
@@ -956,8 +1061,7 @@ export class AccountingService {
   }
 
   /**
-   * Ensure the access token for a connection is valid, refreshing if necessary
-   * @param connectionId The connection ID
+   * Ensure the access token for a connection is valid, refreshing if necessary.
    */
   async ensureConnectionTokenValid(connectionId: string): Promise<void> {
     await this.ensureValidToken(connectionId);

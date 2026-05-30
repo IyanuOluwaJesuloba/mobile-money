@@ -1,5 +1,5 @@
 import dotenv from "dotenv";
-import { cleanEnv, str, bool } from "envalid";
+import { cleanEnv, str, bool, num } from "envalid";
 
 // Load environment variables first
 dotenv.config();
@@ -25,6 +25,27 @@ export const env = cleanEnv(process.env, {
   APP_MAINTENANCE_MODE: bool({
     desc: "Whether the application is in maintenance mode (read-only)",
     default: false,
+  }),
+  INDEX_REINDEX_JOB_ENABLED: bool({
+    default: true,
+    desc: "Whether the automated index reindex maintenance job should run",
+  }),
+  INDEX_REINDEX_CRON: str({
+    default: "0 3 * * *",
+    desc: "Cron schedule for the automated index reindex maintenance job",
+    example: "0 3 * * *",
+  }),
+  INDEX_REINDEX_MIN_SIZE_MB: num({
+    default: 100,
+    desc: "Minimum size in MB for an index to be eligible for automatic reindexing",
+  }),
+  INDEX_REINDEX_MAX_SCAN_COUNT: num({
+    default: 50,
+    desc: "Maximum scan count for an index to still be eligible for automatic reindexing",
+  }),
+  INDEX_REINDEX_MAX_ACTIVE_CONNECTIONS: num({
+    default: 5,
+    desc: "Maximum active queries allowed in the database before the automatic index reindex job is skipped",
   }),
   STELLAR_ISSUER_SECRET: str({
     desc: "Stellar secret key for the issuer account",
@@ -106,4 +127,9 @@ export const {
   PAGERDUTY_DEDUP_KEY,
   ADMIN_API_KEY,
   APP_MAINTENANCE_MODE,
+  INDEX_REINDEX_JOB_ENABLED,
+  INDEX_REINDEX_CRON,
+  INDEX_REINDEX_MIN_SIZE_MB,
+  INDEX_REINDEX_MAX_SCAN_COUNT,
+  INDEX_REINDEX_MAX_ACTIVE_CONNECTIONS,
 } = env;

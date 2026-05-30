@@ -134,6 +134,20 @@ export const activeConnections = new Gauge({
   registers: [register],
 });
 
+export const dbReplicaLagSeconds = new Gauge({
+  name: "db_replica_lag_seconds",
+  help: "Replication lag in seconds for each read replica",
+  labelNames: ["replica_url"],
+  registers: [register],
+});
+
+export const dbReplicaReadEnabled = new Gauge({
+  name: "db_replica_read_enabled",
+  help: "Whether the replica is currently enabled for read routing (1=enabled, 0=disabled)",
+  labelNames: ["replica_url"],
+  registers: [register],
+});
+
 export { register };
 
 // Cache Metrics
@@ -171,5 +185,13 @@ export const crossChainAnomalyTotal = new Counter({
   name: "cross_chain_anomaly_total",
   help: "Number of cross-chain balance anomalies detected",
   labelNames: ["chain", "asset", "reason"],
+  registers: [register],
+});
+
+// System Heartbeat Metric
+export const systemHeartbeat = new Gauge({
+  name: "system_heartbeat",
+  help: "System heartbeat metric indicating baseline availability state (1=available, 0=unavailable)",
+  labelNames: ["service"],
   registers: [register],
 });

@@ -30,8 +30,8 @@ export class AdminSep10Service extends Sep10Service {
     transactionXDR: string,
     clientAccountID?: string
   ): Promise<AdminSep10TokenResponse> {
-    // First verify the standard SEP-10 challenge
-    const baseToken = this.verifyChallenge(transactionXDR, clientAccountID);
+    // First verify the standard SEP-10 challenge (now async)
+    const baseToken = await this.verifyChallenge(transactionXDR, clientAccountID);
 
     // Extract the client public key from the transaction
     const transaction = require("stellar-sdk").TransactionBuilder.fromXDR(

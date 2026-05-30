@@ -4,6 +4,7 @@ import { verifyToken, JWTPayload } from "../auth/jwt";
 import { ADMIN_API_KEY } from "../config/env";
 import { redisClient } from "../config/redis";
 import { getAdminSep10Service } from "../stellar/adminSep10";
+import { evaluateGeoLoginAccess } from "../auth/geo";
 
 type RequestUser = {
   id: string;
@@ -141,12 +142,13 @@ export const requireAuth = (
 /**
  * JWT Authentication middleware that verifies JWT tokens
  * and attaches user information to the request object
+ * Includes IP geofencing validation for operational regions
  */
-export function authenticateToken(
+export async function authenticateToken(
   req: Request,
   res: Response,
   next: NextFunction,
-): void {
+): Promise<void> {
   const authHeader = req.headers.authorization;
   const token = authHeader && authHeader.split(" ")[1]; // Bearer TOKEN
 
@@ -163,6 +165,17 @@ export function authenticateToken(
     if (rejectMutationDuringImpersonation(req, res, decoded)) {
       return;
     }
+
+    // IP Geofencing validation
+    const geoAccess = await evaluateGeoLoginAccess(req);
+    if (!geoAccess.allowed) {
+      res.status(403).json({
+        error: "Access denied",
+        message: geoAccess.reason || "Access from this region is not permitted",
+      });
+      return;
+    }
+
     req.jwtUser = decoded;
     next();
   } catch (error) {

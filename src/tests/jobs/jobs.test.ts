@@ -23,6 +23,7 @@ const mockQuery = pool.query as jest.Mock;
 beforeEach(() => {
   jest.clearAllMocks();
   jest.spyOn(console, "log").mockImplementation(() => {});
+  jest.spyOn(console, "info").mockImplementation(() => {});
   jest.spyOn(console, "warn").mockImplementation(() => {});
   jest.spyOn(console, "error").mockImplementation(() => {});
 });
@@ -152,8 +153,7 @@ describe("startJobs", () => {
   it("schedules all valid jobs", () => {
     (cron.validate as jest.Mock).mockReturnValue(true);
     startJobs();
-    expect(cron.schedule).toHaveBeenCalledTimes(7);
-    expect(cron.schedule).toHaveBeenCalledTimes(5);
+    expect(cron.schedule).toHaveBeenCalledTimes(12);
   });
 
   it("skips jobs with invalid cron expressions", () => {

@@ -353,6 +353,28 @@ export const configSchema = convict({
       env: 'ENABLE_SLOW_QUERY_LOGGING',
     },
   },
+
+  // Response compression
+  compression: {
+    enabled: {
+      doc: 'Enable HTTP response compression',
+      format: Boolean,
+      default: true,
+      env: 'COMPRESSION_ENABLED',
+    },
+    threshold: {
+      doc: 'Minimum response size in bytes to trigger compression',
+      format: 'nat',
+      default: 1024,
+      env: 'COMPRESSION_THRESHOLD',
+    },
+    level: {
+      doc: 'Gzip compression level (0-9) used by zlib',
+      format: 'nat',
+      default: 6,
+      env: 'COMPRESSION_LEVEL',
+    },
+  },
 });
 
 /**

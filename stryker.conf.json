@@ -6,8 +6,11 @@
     "configFile": "jest.stryker.config.js",
     "enableFindRelatedTests": false
   },
-  "checkers": [],
-  "disableTypeChecks": true,
+  "checkers": ["typescript"],
+  "disableTypeChecks": false,
+  "typescriptChecker": {
+    "prioritizePerformanceImpactOver": "accuracy"
+  },
   "mutate": [
     "src/services/retry.ts",
     "src/services/fraud.ts"

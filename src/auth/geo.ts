@@ -49,8 +49,7 @@ async function getGeoReader(): Promise<MaxmindReader | null> {
 
   readerPromise = (async () => {
     try {
-      // eslint-disable-next-line @typescript-eslint/no-var-requires
-      const maxmind = require('maxmind') as { open: (path: string) => Promise<MaxmindReader> };
+      const maxmind = (await import('maxmind')) as typeof import('maxmind');
       return await maxmind.open(geoDbPath);
     } catch {
       return null;

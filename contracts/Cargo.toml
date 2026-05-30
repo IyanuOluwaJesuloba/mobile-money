@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["escrow"]
+members = ["escrow", "htlc"]
 
 [profile.release]
 opt-level = "z"

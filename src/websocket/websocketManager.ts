@@ -50,6 +50,7 @@ export class WebSocketManager {
   private heartbeatInterval: ReturnType<typeof setInterval> | null = null;
   private redisSub: RedisClientType | null = null;
   private redisPub: RedisClientType | null = null;
+  public redisReady: Promise<void>;
 
   private readonly REDIS_CHANNEL = "transaction.updates";
   private readonly HEARTBEAT_INTERVAL_MS = 30_000;
@@ -59,7 +60,7 @@ export class WebSocketManager {
     WebSocketManager.activeInstance = this;
     this.init();
     this.startHeartbeat();
-    this.setupRedis().catch((err) =>
+    this.redisReady = this.setupRedis().catch((err) =>
       console.warn("Redis pub/sub unavailable, running without it:", err),
     );
   }
