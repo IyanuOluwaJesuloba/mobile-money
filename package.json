@@ -45,6 +45,8 @@
     "test:bench": "node tests/load/autocannon/benchmark.js",
     "sdk:generate": "echo 'Start dev server first (npm run dev), then run: openapi-generator-cli generate -i http://localhost:3000/docs/openapi.json -c sdk-config.yaml -o sdk'",
     "sdk:build": "cd sdk && ./gradlew build",
+    "sdk:generate:ts": "openapi-generator-cli generate -i http://localhost:3000/docs/openapi.json -c sdk-config-ts.yaml -o sdk-ts",
+    "sdk:build:ts": "cd sdk-ts && npm install && npm run build",
     "docs:dev": "npm --prefix docs-portal run start",
     "docs:build": "npm --prefix docs-portal run build"
   },
