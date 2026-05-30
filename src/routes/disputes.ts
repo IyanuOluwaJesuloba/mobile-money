@@ -15,7 +15,11 @@
  *
  *   PATCH  /api/disputes/:disputeId/status
  *     Transition dispute status.
- *     Body: { status: 'open'|'investigating'|'resolved'|'rejected', resolution?: string, assignedTo?: string }
+ *     Body: { status: 'open'|'investigating'|'resolved'|'rejected'|'reversed'|'upheld', resolution?: string, assignedTo?: string }
+ *
+ *   POST   /api/disputes/:disputeId/resolve
+ *     Admin reverses or upholds a disputed payment.
+ *     Body: { action: 'reverse'|'uphold', resolution: string, adminId?: string }
  *
  *   PATCH  /api/disputes/:disputeId
  *     Update dispute fields.
@@ -70,6 +74,8 @@ const VALID_STATUSES: DisputeStatus[] = [
   "investigating",
   "resolved",
   "rejected",
+  "reversed",
+  "upheld",
 ];
 
 const VALID_PRIORITIES: DisputePriority[] = [
@@ -267,6 +273,54 @@ disputeRoutes.post(
       return res.status(500).json({ error: message });
     }
   }
+);
+
+/**
+ * POST /api/disputes/:disputeId/resolve
+ */
+disputeRoutes.post(
+  "/:disputeId/resolve",
+  requireAuth,
+  requirePermission("dispute:manage"),
+  async (req: Request, res: Response) => {
+    const { action, resolution, adminId } = req.body;
+
+    if (action !== "reverse" && action !== "uphold") {
+      return res.status(400).json({
+        error: 'Field "action" must be one of: reverse, uphold',
+      });
+    }
+
+    if (
+      !resolution ||
+      typeof resolution !== "string" ||
+      resolution.trim().length === 0
+    ) {
+      return res.status(400).json({
+        error: 'Field "resolution" is required and must be a non-empty string',
+      });
+    }
+
+    try {
+      const updated = await disputeService.resolvePayment(
+        req.params.disputeId,
+        action,
+        resolution,
+        adminId ?? req.user?.id,
+      );
+      return res.json(updated);
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Failed to resolve dispute";
+      const code = message.includes("not found")
+        ? 404
+        : message.includes("Cannot resolve") ||
+            message.includes("Resolution text")
+          ? 422
+          : 500;
+      return res.status(code).json({ error: message });
+    }
+  },
 );
 
 /**

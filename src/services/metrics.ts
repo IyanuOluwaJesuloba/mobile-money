@@ -239,7 +239,7 @@ export async function getDisputeResolutionPercentiles(
       COUNT(*) AS total_count,
       COUNT(CASE WHEN EXTRACT(EPOCH FROM (updated_at - created_at)) * 1000 > $1 THEN 1 END) AS sla_breaches_count
     FROM disputes
-    WHERE status IN ('resolved', 'rejected')
+    WHERE status IN ('resolved', 'rejected', 'reversed', 'upheld')
       AND created_at >= NOW() - INTERVAL '${daysBack} days'
   `;
 
@@ -313,7 +313,7 @@ export async function getDisputeResolutionTrends(
       COUNT(CASE WHEN EXTRACT(EPOCH FROM (updated_at - created_at)) * 1000 > $1 THEN 1 END) AS breach_count,
       COUNT(*) AS total_count
     FROM disputes
-    WHERE status IN ('resolved', 'rejected')
+    WHERE status IN ('resolved', 'rejected', 'reversed', 'upheld')
       AND created_at >= NOW() - INTERVAL '${daysBack} days'
     GROUP BY DATE(created_at)
     ORDER BY date ASC

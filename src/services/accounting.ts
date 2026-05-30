@@ -829,6 +829,130 @@ export class AccountingService {
     }
   }
 
+  private async syncWithdrawalToXeroBill(
+    connection: AccountingConnection,
+    transaction: {
+      id: string;
+      userId: string;
+      type: string;
+      amount: number;
+      fee: number;
+      currency: string;
+      referenceNumber: string;
+      provider: string;
+      createdAt: Date;
+    },
+    mappings: CategoryMapping[]
+  ): Promise<void> {
+    const connectionData = await this.getConnection(connection.id);
+    const txnDate = transaction.createdAt.toISOString().split("T")[0];
+    const withdrawalAccountId = this.getMappedCategory(mappings, "withdrawal");
+    const feeAccountId = this.getMappedCategory(mappings, "fees");
+
+    const withdrawalLine: any = {
+      Description: `Withdrawal payout - ref:${transaction.referenceNumber} via ${transaction.provider}`,
+      Quantity: 1,
+      UnitAmount: transaction.amount,
+      TaxType: "NONE",
+    };
+
+    if (withdrawalAccountId) {
+      withdrawalLine.AccountID = withdrawalAccountId;
+    } else {
+      withdrawalLine.AccountCode = "500";
+    }
+
+    const lineItems: any[] = [withdrawalLine];
+
+    if (transaction.fee > 0) {
+      const feeLine: any = {
+        Description: `Fee - Withdrawal payout ref:${transaction.referenceNumber}`,
+        Quantity: 1,
+        UnitAmount: transaction.fee,
+        TaxType: "NONE",
+      };
+
+      if (feeAccountId) {
+        feeLine.AccountID = feeAccountId;
+      } else {
+        feeLine.AccountCode = "500";
+      }
+
+      lineItems.push(feeLine);
+    }
+
+    const bill = {
+      Type: "ACCPAY",
+      Contact: {
+        Name: "Mobile Money Payouts",
+      },
+      Date: txnDate,
+      DueDate: txnDate,
+      Reference: transaction.referenceNumber,
+      Status: "AUTHORISED",
+      LineItems: lineItems,
+    };
+
+    await axios.post(
+      "https://api.xero.com/api.xro/2.0/Bills",
+      { Bills: [bill] },
+      {
+        headers: {
+          Authorization: `Bearer ${connectionData!.accessToken}`,
+          "Xero-tenant-id": connectionData!.tenantId,
+          "Content-Type": "application/json",
+        },
+      }
+    );
+  }
+
+  private async syncXeroTransactionToManualJournal(
+    connection: AccountingConnection,
+    transaction: {
+      id: string;
+      userId: string;
+      type: string;
+      amount: number;
+      fee: number;
+      currency: string;
+      referenceNumber: string;
+      provider: string;
+      createdAt: Date;
+    }
+  ): Promise<void> {
+    const freshConnection = await this.getConnection(connection.id);
+    const txnDate = transaction.createdAt.toISOString().split("T")[0];
+    const description = `${transaction.type} - ref:${transaction.referenceNumber} via ${transaction.provider}`;
+
+    const journalLines: object[] = [
+      {
+        Description: description,
+        CreditAmount: transaction.amount,
+        AccountID: "revenue-account-id",
+      },
+    ];
+
+    if (transaction.fee > 0) {
+      journalLines.push({
+        Description: `Fee - ${description}`,
+        DebitAmount: transaction.fee,
+        AccountID: "expense-account-id",
+      });
+    }
+
+    await axios.put(
+      "https://api.xero.com/api.xro/2.0/ManualJournals",
+      { Date: txnDate, Narration: transaction.id, JournalLines: journalLines },
+      {
+        headers: {
+          Authorization: `Bearer ${freshConnection!.accessToken}`,
+          "Xero-tenant-id": freshConnection!.tenantId,
+          "Content-Type": "application/json",
+        },
+      }
+    );
+  }
+
   private getMappedCategory(mappings: CategoryMapping[], mobileMoneyCategory: string): string | null {
     const mapping = mappings.find(m => m.mobileMoneyCategory === mobileMoneyCategory);
     return mapping ? mapping.accountingCategoryId : null;
@@ -900,31 +1024,18 @@ export class AccountingService {
             }
           );
         } else if (connection.provider === AccountingProvider.XERO) {
-          const journalLines: object[] = [
-            {
-              Description: description,
-              CreditAmount: transaction.amount,
-              AccountID: "revenue-account-id", // overridden by category mapping if set
-            },
-          ];
-          if (transaction.fee > 0) {
-            journalLines.push({
-              Description: `Fee - ${description}`,
-              DebitAmount: transaction.fee,
-              AccountID: "expense-account-id",
-            });
-          }
-          await axios.put(
-            "https://api.xero.com/api.xro/2.0/ManualJournals",
-            { Date: txnDate, Narration: transaction.id, JournalLines: journalLines },
-            {
-              headers: {
-                Authorization: `Bearer ${fresh.accessToken}`,
-                "Xero-tenant-id": fresh.tenantId,
-                "Content-Type": "application/json",
-              },
+          if (transaction.type === "withdraw") {
+            const mappings = await this.getCategoryMappings(connection.id);
+            const withdrawalAccountId = this.getMappedCategory(mappings, "withdrawal");
+
+            if (withdrawalAccountId) {
+              await this.syncWithdrawalToXeroBill(fresh, transaction, mappings);
+            } else {
+              await this.syncXeroTransactionToManualJournal(fresh, transaction);
             }
-          );
+          } else {
+            await this.syncXeroTransactionToManualJournal(fresh, transaction);
+          }
         }
 
         await pool.query(

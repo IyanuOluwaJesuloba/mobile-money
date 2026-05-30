@@ -413,4 +413,88 @@ describe("AccountingService", () => {
       ]);
     });
   });
+
+  describe("syncTransaction", () => {
+    it("should create a Xero bill for withdraw transactions when a withdrawal category mapping exists", async () => {
+      const xeroConnection = {
+        ...mockConnection,
+        provider: AccountingProvider.XERO,
+        tenantId: "test-tenant-id",
+        updatedAt: new Date(),
+      };
+
+      const mappingRows = [
+        {
+          id: "map-withdrawal",
+          connection_id: "test-connection-id",
+          mobile_money_category: "withdrawal",
+          accounting_category_id: "account-id-withdrawal",
+          accounting_category_name: "Withdrawal Expense",
+          created_at: new Date(),
+        },
+        {
+          id: "map-fees",
+          connection_id: "test-connection-id",
+          mobile_money_category: "fees",
+          accounting_category_id: "account-id-fees",
+          accounting_category_name: "Fee Expense",
+          created_at: new Date(),
+        },
+      ];
+
+      mockPool.query
+        .mockResolvedValueOnce({ rows: [xeroConnection] }) // getUserConnections
+        .mockResolvedValueOnce({ rows: [xeroConnection] }) // ensureValidToken getConnection
+        .mockResolvedValueOnce({ rows: [xeroConnection] }) // fresh getConnection
+        .mockResolvedValueOnce({ rows: mappingRows }) // getCategoryMappings
+        .mockResolvedValueOnce({ rows: [] }); // insert accounting_sync_queue
+
+      mockAxios.post.mockResolvedValue({ data: { Bills: [{ BillID: "test-bill-id" }] } });
+
+      await accountingService.syncTransaction({
+        id: "txn-123",
+        userId: "test-user-id",
+        type: "withdraw",
+        amount: 100,
+        fee: 2.5,
+        currency: "USD",
+        referenceNumber: "REF123",
+        provider: "mtn",
+        createdAt: new Date("2024-01-01T12:00:00Z"),
+      });
+
+      expect(mockAxios.post).toHaveBeenCalledWith(
+        "https://api.xero.com/api.xro/2.0/Bills",
+        expect.objectContaining({
+          Bills: [
+            expect.objectContaining({
+              Type: "ACCPAY",
+              Reference: "REF123",
+              LineItems: expect.arrayContaining([
+                expect.objectContaining({
+                  AccountID: "account-id-withdrawal",
+                  UnitAmount: 100,
+                }),
+                expect.objectContaining({
+                  AccountID: "account-id-fees",
+                  UnitAmount: 2.5,
+                }),
+              ]),
+            }),
+          ],
+        }),
+        expect.objectContaining({
+          headers: expect.objectContaining({
+            Authorization: "Bearer test-access-token",
+            "Xero-tenant-id": "test-tenant-id",
+          }),
+        })
+      );
+
+      expect(mockPool.query).toHaveBeenCalledWith(
+        expect.stringContaining("INSERT INTO accounting_sync_queue"),
+        ["txn-123", "test-connection-id"]
+      );
+    });
+  });
 });

@@ -47,7 +47,7 @@ export async function runStaleTransactionWatchdog(
   const mobileMoneyService = service ?? new MobileMoneyService();
 
   let resolved = 0;
-  let expired = 0;
+  const expired = 0;
   let errors = 0;
 
   for (const row of result.rows) {

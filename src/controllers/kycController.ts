@@ -2,6 +2,7 @@ import { Request, Response } from 'express';
 import { Pool } from 'pg';
 import KYCService, { KYCLevel, DocumentType } from '../services/kyc';
 import { z } from 'zod';
+import { UserModel } from '../models/users';
 
 // Validation schemas
 const CreateApplicantSchema = z.object({
@@ -50,10 +51,12 @@ const GenerateSDKTokenSchema = z.object({
 export class KYCController {
   private kycService: KYCService;
   private db: Pool;
+  private userModel: UserModel;
 
   constructor(db: Pool) {
     this.db = db;
     this.kycService = new KYCService(db);
+    this.userModel = new UserModel();
   }
 
   /**
@@ -74,6 +77,15 @@ export class KYCController {
 
       // Store applicant reference with user
       await this.storeApplicantReference(userId, applicant.id);
+
+      // Save sensitive fields in users table in encrypted form
+      await this.userModel.updateSensitiveData(userId, {
+        firstName: validatedData.first_name,
+        lastName: validatedData.last_name,
+        address: validatedData.address ? `${validatedData.address.building_number || ''} ${validatedData.address.street}, ${validatedData.address.town}, ${validatedData.address.postcode}, ${validatedData.address.country}`.trim() : undefined,
+        dateOfBirth: validatedData.dob,
+        idNumber: validatedData.custom_fields?.id_number || (validatedData as any).id_number || (validatedData.custom_fields?.tax_id as string),
+      });
 
       res.status(201).json({
         success: true,

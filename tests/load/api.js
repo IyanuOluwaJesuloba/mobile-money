@@ -36,6 +36,7 @@
 import http from 'k6/http';
 import { check, sleep, group } from 'k6';
 import { Counter, Rate, Trend } from 'k6/metrics';
+import exec from 'k6/x/exec';
 
 // ---------------------------------------------------------------------------
 // Custom metrics
@@ -49,6 +50,7 @@ const listLatency     = new Trend('list_latency_ms',     true);
 const txCreated       = new Counter('tx_created_total');
 const txFailed        = new Counter('tx_failed_total');
 const txSuccessRate   = new Rate('tx_success_rate');
+const rssMemory = new Trend('rss_memory_kb', true);
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -196,6 +198,8 @@ export const options = {
     tx_success_rate: [
       { threshold: 'rate>0.90', abortOnFail: isBreakpoint, delayAbortEval: '30s' },
     ],
+    // RSS memory usage threshold (max 500 MB)
+    rss_memory_kb: [{ threshold: 'max<512000', abortOnFail: isBreakpoint, delayAbortEval: '30s' }],
   },
 
   // Extended percentile set for the end-of-test summary table
@@ -258,6 +262,21 @@ function amountFor(prov, seed) {
  */
 function idempotencyKey(vuId, iter) {
   return `lt-vu${vuId}-it${iter}`;
+}
+
+// Helper to record RSS memory usage using k6 exec extension
+function recordRss() {
+  try {
+    // Get current process PID (Unix-like systems)
+    const pid = exec.run('bash', ['-c', 'echo $$']).trim();
+    const output = exec.run('ps', ['-p', pid, '-o', 'rss=']).trim();
+    const rssKb = parseInt(output, 10);
+    if (!isNaN(rssKb)) {
+      rssMemory.add(rssKb);
+    }
+  } catch (e) {
+    console.warn('Failed to record RSS:', e.message);
+  }
 }
 
 /** Build HTTP params with per-operation tag for metric segmentation. */
@@ -324,6 +343,8 @@ export default function () {
   const iter = __ITER;
   const seed = vuId * 100000 + iter;
   const prov = providerForVU(vuId);
+  // Record RSS memory usage for this iteration
+  recordRss();
 
   // 1. Health probe
   group('health_probe', function () {
@@ -514,6 +535,7 @@ export function handleSummary(data) {
     '╔══════════════════════════════════════════════════════════════════════════════╗',
     `║  Mobile Money API — Load Test Report                                         ║`,
     `║  Scenario : ${pad(SCENARIO, 65)}║`,
+    `║  RSS Memory (KB) : Avg ${pad(rssMemory.avg ? rssMemory.avg.toFixed(0) : 'N/A', 5)} Min ${pad(rssMemory.min || 'N/A',5)} Max ${pad(rssMemory.max || 'N/A',5)}║`,
     `║  Result   : ${pad(overallPass ? 'PASS' : 'FAIL', 65)}║`,
     '╚══════════════════════════════════════════════════════════════════════════════╝',
     '',
@@ -612,6 +634,11 @@ export function handleSummary(data) {
         httpErrorRatePass:   passErr,
         depositP95Pass:      passLat,
         txSuccessRatePass:   passTxSR,
+      },
+      rss_memory_kb: {
+        min: rssMemory.min,
+        max: rssMemory.max,
+        avg: rssMemory.avg,
       },
       sizing,
     },

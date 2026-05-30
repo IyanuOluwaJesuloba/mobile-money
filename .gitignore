@@ -44,3 +44,4 @@ benchmarks/results/*.json
 *.temp
 .cache/
 
+secret.yaml

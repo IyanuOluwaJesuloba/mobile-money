@@ -15,7 +15,7 @@ import { hashPassword } from '../utils/password';
 import { redisClient } from '../config/redis';
 import { TransactionModel } from '../models/transaction';
 import { EmailService } from '../services/email';
-import { authRateLimiter } from '../middleware/authRateLimit';
+import { loginRateLimiter, registerRateLimiter } from '../middleware/authRateLimit';
 
 const emailService = new EmailService();
 
@@ -28,13 +28,14 @@ export const registerSchema = z.object({
     .min(12, 'Password must be at least 12 characters')
     .regex(/[A-Z]/, 'Password must contain at least one uppercase letter')
     .regex(/[a-z]/, 'Password must contain at least one lowercase letter')
+    .regex(/[0-9]/, 'Password must contain at least one number')
     .regex(/[^A-Za-z0-9]/, 'Password must contain at least one special character'),
 });
 
 /**
  * POST /api/auth/register
  */
-authRoutes.post('/register', authRateLimiter, validateRequest(registerSchema), async (req: Request, res: Response) => {
+authRoutes.post('/register', registerRateLimiter, validateRequest(registerSchema), async (req: Request, res: Response) => {
   const { phone_number, password } = req.body as z.infer<typeof registerSchema>;
   try {
     const passwordHash = await hashPassword(password);
@@ -62,7 +63,7 @@ authRoutes.use('/sso/oidc', createOIDCRouter());
  * Enforces account lockout after 5 failed attempts within 10 minutes.
  * Sends an email notification when an account is locked.
  */
-authRoutes.post('/login', authRateLimiter, async (req: Request, res: Response) => {
+authRoutes.post('/login', loginRateLimiter, async (req: Request, res: Response) => {
   const { phone_number } = req.body;
 
   if (!phone_number) {

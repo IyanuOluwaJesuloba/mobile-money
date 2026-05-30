@@ -6,6 +6,7 @@
 import { Router, Request, Response } from "express";
 import { requireAuth, AuthRequest } from "../middleware/auth";
 import { travelRuleService, TravelRuleRecord } from "../compliance/travelRule";
+import { travelRuleCheckHandler } from "../controllers/complianceController";
 
 export const travelRuleRoutes = Router();
 
@@ -50,6 +51,13 @@ function serializeRecord(r: TravelRuleRecord) {
     exportedBy: r.exportedBy ?? null,
   };
 }
+
+/**
+ * POST /api/v1/compliance/travel-rule/check
+ * Checks whether a transaction amount triggers the Travel Rule and, if so,
+ * captures the required identity data. Requires authentication.
+ */
+travelRuleRoutes.post("/check", requireAuth, travelRuleCheckHandler);
 
 /**
  * GET /api/v1/compliance/travel-rule
