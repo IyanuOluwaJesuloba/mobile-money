@@ -59,6 +59,34 @@ describe("UserModel PII Encryption and RBAC Access", () => {
     expect(row.id_number).not.toBe(sensitiveData.idNumber);
   });
 
+  it("should store and return merchant MCC codes for merchant user records", async () => {
+    const merchantRoleResult = await pool.query(
+      `INSERT INTO roles (name, description) VALUES ('merchant', 'Merchant account') ON CONFLICT (name) DO NOTHING RETURNING id`
+    );
+    let merchantRoleId = merchantRoleResult.rows[0]?.id;
+    if (!merchantRoleId) {
+      const existingRole = await pool.query(
+        `SELECT id FROM roles WHERE name = 'merchant' LIMIT 1`
+      );
+      merchantRoleId = existingRole.rows[0].id;
+    }
+
+    const merchantResult = await pool.query(
+      `INSERT INTO users (phone_number, kyc_level, role_id, mcc)
+         VALUES ($1, $2, $3, $4)
+         RETURNING id`,
+      ["+19998887778", "basic", merchantRoleId, "5411"],
+    );
+
+    const merchantId = merchantResult.rows[0].id;
+    const merchant = await userModel.findById(merchantId, { id: "admin-id", role: "admin" });
+
+    expect(merchant).toBeDefined();
+    expect(merchant?.mcc).toBe("5411");
+
+    await pool.query("DELETE FROM users WHERE id = $1", [merchantId]);
+  });
+
   it("should seamlessly decrypt PII fields for authorized roles", async () => {
     const sensitiveData = {
       firstName: "Alice",

@@ -7,6 +7,7 @@ export interface User {
   kycLevel: string;
   preferredLanguage?: string;
   email?: string;
+  mcc?: string | null;
   two_factor_secret?: string | null;
   backup_codes?: string[] | null;
   status: 'active' | 'frozen' | 'suspended';
