@@ -2658,51 +2658,283 @@ export class AccountingService {
   }): Promise<void> {
     const connections = await this.getUserConnections(transaction.userId);
     if (connections.length === 0) return;
+          Description: `Daily P&L - ${pnlData.date}`,
+          Amount: pnlData.revenue,
+          DetailType: "JournalEntryLineDetail",
+          JournalEntryLineDetail: {
+            PostingType: "Credit",
+            AccountRef: this.getMappedCategory(mappings, "revenue") || { value: "1" }, // Default to Sales
+          },
+        },
+        {
+          Description: `Daily Fees - ${pnlData.date}`,
+          Amount: pnlData.fees,
+          DetailType: "JournalEntryLineDetail",
+          JournalEntryLineDetail: {
+            PostingType: "Debit",
+            AccountRef: this.getMappedCategory(mappings, "fees") || { value: "4" },
+          },
+        },
+      ],
+    };
+
+    try {
+      await axios.post(
+        `https://quickbooks.api.intuit.com/v3/company/${connectionData!.realmId}/journalentry`,
+        journalEntry,
+        {
+          headers: {
+            Authorization: `Bearer ${connectionData!.accessToken}`,
+            "Content-Type": "application/json",
+          },
+        }
+      );
+
+      syncLog.recordsProcessed = 1;
+      syncLog.recordsSucceeded = 1;
+    } catch (error) {
+      syncLog.recordsProcessed = 1;
+      syncLog.recordsFailed = 1;
+      throw error;
+    }
+  }
+
+  private async syncPnLToXero(
+    connection: AccountingConnection,
+    pnlData: PnLData,
+    syncLog: SyncLog
+  ): Promise<void> {
+    const connectionData = await this.getConnection(connection.id);
+    const mappings = await this.getCategoryMappings(connection.id);
+
+    // Create manual journal entry for PnL
+    const journalEntry = {
+      Date: pnlData.date,
+      JournalLines: [
+        {
+          Description: `Daily P&L - ${pnlData.date}`,
+          CreditAmount: pnlData.revenue,
+          AccountID: this.getMappedCategory(mappings, "revenue") || "1", // Default to Sales
+        },
+        {
+          Description: `Daily Fees - ${pnlData.date}`,
+          DebitAmount: pnlData.fees,
+          AccountID: this.getMappedCategory(mappings, "fees") || "4", // Default to Expense
+        },
+      ],
+    };
+
+    try {
+      await axios.put(
+        "https://api.xero.com/api.xro/2.0/ManualJournals",
+        journalEntry,
+        {
+          headers: {
+            Authorization: `Bearer ${connectionData!.accessToken}`,
+            "Xero-tenant-id": connectionData!.tenantId,
+            "Content-Type": "application/json",
+          },
+        }
+      );
+
+      syncLog.recordsProcessed = 1;
+      syncLog.recordsSucceeded = 1;
+    } catch (error) {
+      syncLog.recordsProcessed = 1;
+      syncLog.recordsFailed = 1;
+      throw error;
+    }
+  }
+
+  private async syncFeeRevenueToQuickBooks(
+    connection: AccountingConnection,
+    feeData: Array<{ category: string; amount: number }>,
+    syncLog: SyncLog
+  ): Promise<void> {
+    const connectionData = await this.getConnection(connection.id);
+    const mappings = await this.getCategoryMappings(connection.id);
+
+    const lines = feeData.map(fee => ({
+      Description: `Fee Revenue - ${fee.category}`,
+      Amount: fee.amount,
+      DetailType: "JournalEntryLineDetail",
+      JournalEntryLineDetail: {
+        PostingType: "Credit",
+        AccountRef: this.getMappedCategory(mappings, fee.category) || { value: "1" },
+      },
+    }));
+
+    const journalEntry = {
+      TxnDate: new Date().toISOString().split('T')[0],
+      Line: lines,
+    };
+
+    try {
+      await axios.post(
+        `https://quickbooks.api.intuit.com/v3/company/${connectionData!.realmId}/journalentry`,
+        journalEntry,
+        {
+          headers: {
+            Authorization: `Bearer ${connectionData!.accessToken}`,
+            "Content-Type": "application/json",
+          },
+        }
+      );
+
+      syncLog.recordsProcessed = feeData.length;
+      syncLog.recordsSucceeded = feeData.length;
+    } catch (error) {
+      syncLog.recordsProcessed = feeData.length;
+      syncLog.recordsFailed = feeData.length;
+      throw error;
+    }
+  }
+
+  private async syncFeeRevenueToXero(
+    connection: AccountingConnection,
+    feeData: Array<{ category: string; amount: number }>,
+    syncLog: SyncLog
+  ): Promise<void> {
+    const connectionData = await this.getConnection(connection.id);
+    const mappings = await this.getCategoryMappings(connection.id);
+
+    const journalLines = feeData.map(fee => ({
+      Description: `Fee Revenue - ${fee.category}`,
+      CreditAmount: fee.amount,
+      AccountID: this.getMappedCategory(mappings, fee.category) || "1",
+    }));
+
+    const journalEntry = {
+      Date: new Date().toISOString().split('T')[0],
+      JournalLines: journalLines,
+    };
+
+    try {
+      await axios.put(
+        "https://api.xero.com/api.xro/2.0/ManualJournals",
+        journalEntry,
+        {
+          headers: {
+            Authorization: `Bearer ${connectionData!.accessToken}`,
+            "Xero-tenant-id": connectionData!.tenantId,
+            "Content-Type": "application/json",
+          },
+        }
+      );
+
+      syncLog.recordsProcessed = feeData.length;
+      syncLog.recordsSucceeded = feeData.length;
+    } catch (error) {
+      syncLog.recordsProcessed = feeData.length;
+      syncLog.recordsFailed = feeData.length;
+      throw error;
+    }
+  }
+
+  private getMappedCategory(mappings: CategoryMapping[], mobileMoneyCategory: string): string | null {
+    const mapping = mappings.find(m => m.mobileMoneyCategory === mobileMoneyCategory);
+    return mapping ? mapping.accountingCategoryId : null;
+  }
+
+  private async syncSalesReceiptToQuickBooks(connection: AccountingConnection, transaction: {
+    id: string;
+    userId: string;
+    type: string;
+    amount: number;
+    fee: number;
+    currency: string;
+    referenceNumber: string;
+    provider: string;
+    createdAt: Date;
+  }): Promise<void> {
+    // QuickBooks SalesReceipt creation for deposit transactions
+    const txnDate = transaction.createdAt.toISOString().split('T')[0];
+    const payload = {
+      TxnDate: txnDate,
+      PrivateNote: transaction.id,
+      CustomerRef: { value: "1" }, // Default customer ID; should be configurable
+      Line: [
+        {
+          Amount: transaction.amount,
+          DetailType: "SalesItemLineDetail",
+          SalesItemLineDetail: {
+            ItemRef: { value: "1" }, // Default item/service ID
+          },
+        },
+      ],
+      CurrencyRef: transaction.currency ? { value: transaction.currency } : undefined,
+    };
+
+    await axios.post(
+      `https://quickbooks.api.intuit.com/v3/company/${connection.realmId}/salesreceipt`,
+      payload,
+      {
+        headers: {
+          Authorization: `Bearer ${connection.accessToken}`,
+          "Content-Type": "application/json",
+        },
+      }
+    );
+  }
+
+  /**
+   * Sync a single completed transaction to all active accounting connections for the user.
+   * Called automatically when a transaction.completed event fires.
+   */
+  async syncTransaction(transaction: {
+    id: string;
+    userId: string;
+    type: string;
+    amount: number;
+    fee: number;
+    currency: string;
+    referenceNumber: string;
+    provider: string;
+    createdAt: Date;
+  }): Promise<void> {
+    const connections = await this.getUserConnections(transaction.userId);
+    if (connections.length === 0) return;
 
     for (const connection of connections) {
       await this.ensureValidToken(connection.id);
       const fresh = await this.getConnection(connection.id);
       if (!fresh) continue;
-
-      const txnDate = transaction.createdAt.toISOString().split("T")[0];
-      const description = `${transaction.type} - ref:${transaction.referenceNumber} via ${transaction.provider}`;
-
       try {
         if (connection.provider === AccountingProvider.QUICKBOOKS) {
-          await axios.post(
-            `https://quickbooks.api.intuit.com/v3/company/${fresh.realmId}/journalentry`,
-            {
-              TxnDate: txnDate,
-              PrivateNote: transaction.id,
-              Line: [
-                {
-                  Description: description,
-                  Amount: transaction.amount,
-                  DetailType: "JournalEntryLineDetail",
-                  JournalEntryLineDetail: {
-                    PostingType: "Credit",
-                    AccountRef: { value: "1" }, // Sales / Revenue
+          if (transaction.type === 'deposit') {
+            // Create a Sales Receipt in QuickBooks for deposit transactions
+            await this.syncSalesReceiptToQuickBooks(fresh, transaction);
+          } else {
+            // Existing journal entry sync for other transaction types
+            await axios.post(
+              `https://quickbooks.api.intuit.com/v3/company/${fresh.realmId}/journalentry`,
+              {
+                TxnDate: transaction.createdAt.toISOString().split('T')[0],
+                PrivateNote: transaction.id,
+                Line: [
+                  {
+                    Description: `${transaction.type} - ref:${transaction.referenceNumber} via ${transaction.provider}`,
+                    Amount: transaction.amount,
+                    DetailType: "JournalEntryLineDetail",
+                    JournalEntryLineDetail: {
+                      PostingType: "Credit",
+                      AccountRef: { value: "1" }, // Sales / Revenue
+                    },
                   },
-                },
-                ...(transaction.fee > 0
-                  ? [
-                      {
-                        Description: `Fee - ${description}`,
-                        Amount: transaction.fee,
-                        DetailType: "JournalEntryLineDetail",
-                        JournalEntryLineDetail: {
-                          PostingType: "Debit",
-                          AccountRef: { value: "4" }, // Expense
+                  ...(transaction.fee > 0
+                    ? [
+                        {
+                          Description: `Fee - ${transaction.type} - ref:${transaction.referenceNumber} via ${transaction.provider}`,
+                          Amount: transaction.fee,
+                          DetailType: "JournalEntryLineDetail",
+                          JournalEntryLineDetail: {
+                            PostingType: "Debit",
+                            AccountRef: { value: "4" }, // Expense
+                          },
                         },
-                      },
-                    ]
-                  : []),
-              ],
-            },
-            {
-              headers: {
-                Authorization: `Bearer ${fresh.accessToken}`,
-                "Content-Type": "application/json",
+                      ]
+                    : []),
+                ],
               },
             },
           );
