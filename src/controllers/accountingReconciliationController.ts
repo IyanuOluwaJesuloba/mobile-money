@@ -43,11 +43,15 @@ export class AccountingReconciliationController {
         return res.status(404).json({ error: "Connection not found" });
       }
       
-      // TODO: Add user authentication check here
-      // const userId = (req as any).user.id;
-      // if (connection.userId !== userId) {
-      //   return res.status(403).json({ error: "Unauthorized" });
-      // }
+      // Verify user owns the connection
+      const userId = (req as any).user?.id;
+      if (!userId) {
+        return res.status(401).json({ error: "Authentication required" });
+      }
+      
+      if (connection.userId !== userId) {
+        return res.status(403).json({ error: "Unauthorized - Connection does not belong to user" });
+      }
 
       const reportId = await this.reconService.runDailyReconciliation(
         provider as AccountingProvider,
@@ -77,9 +81,14 @@ export class AccountingReconciliationController {
       const limit = parseInt(req.query.limit as string) || 10;
       const offset = parseInt(req.query.offset as string) || 0;
       
-      // TODO: Add user authentication and filtering by user's connections
+      // Verify user is authenticated
+      const userId = (req as any).user?.id;
+      if (!userId) {
+        return res.status(401).json({ error: "Authentication required" });
+      }
       
-      const reports = await this.reconService.getReports(limit, offset);
+      // Fetch only reports for user's connections
+      const reports = await this.reconService.getReportsByUserId(userId, limit, offset);
       res.json({ success: true, data: reports });
     } catch (error) {
       logger.error(error, "Failed to fetch accounting reconciliation reports");
@@ -101,7 +110,16 @@ export class AccountingReconciliationController {
         return res.status(404).json({ error: "Report not found" });
       }
       
-      // TODO: Add user authorization check
+      // Verify user owns the connection associated with this report
+      const userId = (req as any).user?.id;
+      if (!userId) {
+        return res.status(401).json({ error: "Authentication required" });
+      }
+      
+      const connection = await this.accountingService.getConnection(report.connectionId);
+      if (!connection || connection.userId !== userId) {
+        return res.status(403).json({ error: "Unauthorized - Report does not belong to user" });
+      }
       
       const discrepancies = await this.reconService.getDiscrepanciesByReportId(id);
       
@@ -131,10 +149,29 @@ export class AccountingReconciliationController {
         return res.status(400).json({ error: "Resolution notes are required" });
       }
       
-      // TODO: Add user authentication and authorization check
-      // const userId = (req as any).user.id;
+      // Verify user is authenticated
+      const userId = (req as any).user?.id;
+      if (!userId) {
+        return res.status(401).json({ error: "Authentication required" });
+      }
       
-      await this.reconService.resolveDiscrepancy(id, notes, /* userId */ "temp-user-id");
+      // Verify user owns the report associated with this discrepancy
+      const discrepancy = await this.reconService.getDiscrepancyById(id);
+      if (!discrepancy) {
+        return res.status(404).json({ error: "Discrepancy not found" });
+      }
+      
+      const report = await this.reconService.getReportById(discrepancy.reportId);
+      if (!report) {
+        return res.status(404).json({ error: "Associated report not found" });
+      }
+      
+      const connection = await this.accountingService.getConnection(report.connectionId);
+      if (!connection || connection.userId !== userId) {
+        return res.status(403).json({ error: "Unauthorized - Discrepancy does not belong to user" });
+      }
+      
+      await this.reconService.resolveDiscrepancy(id, notes, userId);
       
       res.json({ success: true, message: "Discrepancy marked as resolved" });
     } catch (error) {
@@ -153,7 +190,21 @@ export class AccountingReconciliationController {
       const limit = parseInt(req.query.limit as string) || 10;
       const offset = parseInt(req.query.offset as string) || 0;
       
-      // TODO: Add user authentication and authorization check
+      // Verify user is authenticated
+      const userId = (req as any).user?.id;
+      if (!userId) {
+        return res.status(401).json({ error: "Authentication required" });
+      }
+      
+      // Verify user owns the connection
+      const connection = await this.accountingService.getConnection(connectionId);
+      if (!connection) {
+        return res.status(404).json({ error: "Connection not found" });
+      }
+      
+      if (connection.userId !== userId) {
+        return res.status(403).json({ error: "Unauthorized - Connection does not belong to user" });
+      }
       
       const reports = await this.reconService.getReportsByConnection(connectionId, limit, offset);
       res.json({ success: true, data: reports });
@@ -176,7 +227,16 @@ export class AccountingReconciliationController {
         return res.status(404).json({ error: "Report not found" });
       }
       
-      // TODO: Add user authorization check
+      // Verify user is authenticated and owns the connection
+      const userId = (req as any).user?.id;
+      if (!userId) {
+        return res.status(401).json({ error: "Authentication required" });
+      }
+      
+      const connection = await this.accountingService.getConnection(report.connectionId);
+      if (!connection || connection.userId !== userId) {
+        return res.status(403).json({ error: "Unauthorized - Report does not belong to user" });
+      }
       
       const csv = await this.reconService.exportReportToCSV(id);
       

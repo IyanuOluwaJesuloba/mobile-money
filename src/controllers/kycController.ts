@@ -430,24 +430,72 @@ export class KYCController {
    * Handle webhook events from KYC provider
    * POST /api/kyc/webhooks
    */
- handleWebhook = async (req: Request, res: Response) => {
-  try {
-    const webhookSecret = process.env.KYC_WEBHOOK_SECRET;
+  handleWebhook = async (req: Request, res: Response) => {
+    try {
+      const webhookSecret = process.env.KYC_WEBHOOK_SECRET;
 
-    // Verify webhook signature if secret is configured
-    if (webhookSecret && req.headers["x-onfido-signature"]) {
-      // TODO: Implement signature verification using webhookSecret
-      // This is a security measure to ensure webhook is from Entrust
+      // Verify webhook signature if secret is configured
+      if (webhookSecret && req.headers["x-onfido-signature"]) {
+        const signature = req.headers["x-onfido-signature"] as string;
+        const isValid = this.verifyWebhookSignature(
+          JSON.stringify(req.body),
+          signature,
+          webhookSecret
+        );
+        
+        if (!isValid) {
+          logger.warn(
+            { signature, headers: req.headers },
+            'Invalid webhook signature'
+          );
+          throw createError(
+            ERROR_CODES.UNAUTHORIZED,
+            "Invalid webhook signature"
+          );
+        }
+      }
+
+      const event = req.body;
+      await this.kycService.handleWebhook(event);
+
+      res.status(200).json({ success: true });
+    } catch (error) {
+      logger.error({ error }, 'Handle webhook error');
+      throw createError(ERROR_CODES.INTERNAL_ERROR, "Failed to handle webhook", {
+        message: error instanceof Error ? error.message : "Unknown error",
+      });
     }
+  };
 
-    const event = req.body;
-    await this.kycService.handleWebhook(event);
-
-    res.status(200).json({ success: true });
-  } catch (error) {
-    console.error("Handle webhook error:", error);
-    throw createError(ERROR_CODES.INTERNAL_ERROR, "Failed to handle webhook", {
-      message: error instanceof Error ? error.message : "Unknown error",
+  /**
+   * Verify webhook signature using HMAC-SHA256
+   * @param payload - The raw request body as a string
+   * @param signature - The signature from x-onfido-signature header
+   * @param secret - The webhook secret
+   * @returns true if signature is valid, false otherwise
+   */
+  private verifyWebhookSignature(
+    payload: string,
+    signature: string,
+    secret: string
+  ): boolean {
+    try {
+      const crypto = require('crypto');
+      const expectedSignature = crypto
+        .createHmac('sha256', secret)
+        .update(payload)
+        .digest('hex');
+      
+      // Use timing-safe comparison to prevent timing attacks
+      return crypto.timingSafeEqual(
+        Buffer.from(signature),
+        Buffer.from(expectedSignature)
+      );
+    } catch (error) {
+      logger.error({ error }, 'Error verifying webhook signature');
+      return false;
+    }
+  }
     });
   }
 };
