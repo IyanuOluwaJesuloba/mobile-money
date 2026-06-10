@@ -156,7 +156,7 @@ export class AccountingReconciliationController {
       }
       
       // Resolve the discrepancy (in production, should verify ownership)
-      await this.reconService.resolveDiscrepancy(id, notes, reviewedBy);
+      await this.reconService.resolveDiscrepancy(id, notes, userId);
       
       res.json({ success: true, message: "Discrepancy resolved successfully" });
     } catch (error) {

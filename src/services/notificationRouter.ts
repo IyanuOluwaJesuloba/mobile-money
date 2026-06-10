@@ -22,6 +22,15 @@ export interface NotificationContext {
   locale?: string;
 }
 
+export interface DisputeNotificationContext {
+  disputeId: string;
+  transactionId: string;
+  event: string;
+  status: string;
+  message: string;
+  metadata?: Record<string, unknown>;
+}
+
 export interface NotificationRoutingRule {
   severity: NotificationSeverity;
   channels: NotificationChannel[];
@@ -390,6 +399,26 @@ export class NotificationRouter {
       message,
       data,
     });
+  }
+
+  async sendDisputeNotification(context: DisputeNotificationContext): Promise<void> {
+    const severity: NotificationSeverity =
+      context.status === "reversed" || context.status === "upheld"
+        ? "high"
+        : "medium";
+
+    await this.routeSystemNotification(
+      severity,
+      "dispute",
+      `Dispute ${context.event}`,
+      context.message,
+      {
+        disputeId: context.disputeId,
+        transactionId: context.transactionId,
+        status: context.status,
+        ...context.metadata,
+      },
+    );
   }
 }
 

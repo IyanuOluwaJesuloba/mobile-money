@@ -5,6 +5,10 @@ import { pool } from "../../config/database";
 jest.mock("../../config/database");
 jest.mock("axios");
 jest.mock("uuid");
+jest.mock("../../queue/accountingTokenRefreshQueue", () => ({
+  addAccountingTokenRefreshJob: jest.fn().mockResolvedValue(undefined),
+  removeAccountingTokenRefreshJob: jest.fn().mockResolvedValue(undefined),
+}));
 
 const mockPool = pool as jest.Mocked<typeof pool>;
 const mockAxios = require("axios");

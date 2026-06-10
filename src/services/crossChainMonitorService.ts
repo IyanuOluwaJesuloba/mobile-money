@@ -7,7 +7,6 @@ import {
 import logger from "../utils/logger";
 import { MTNProvider } from "./mobilemoney/providers/mtn";
 import { AirtelService } from "./mobilemoney/providers/airtel";
-import { OrangeProvider } from "./mobilemoney/providers/orange";
 
 export interface ChainAssetSnapshot {
   chain: "stellar" | "mtn" | "airtel" | "orange";
@@ -42,9 +41,8 @@ async function getProviderBalance(
         break;
         
       case MobileMoneyProvider.ORANGE:
-        const orangeService = new OrangeService();
-        result = await orangeService.getOperationalBalance();
-        break;
+        logger.warn({ provider, currency }, "Orange balance checks are not implemented");
+        return "0";
         
       default:
         logger.warn({ provider, currency }, 'Unknown provider for balance check');

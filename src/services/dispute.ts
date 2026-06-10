@@ -33,6 +33,7 @@ import {
   ReportFilter,
 } from "../models/dispute";
 import { TransactionModel, TransactionStatus } from "../models/transaction";
+import logger from "../utils/logger";
 
 // ---------------------------------------------------------------------------
 // Allowed status transitions
@@ -75,7 +76,6 @@ interface NotificationPayload {
 async function sendNotification(payload: NotificationPayload): Promise<void> {
   // Import notification router service for proper multi-channel delivery
   const { notificationRouter } = await import("./notificationRouter.js");
-  const logger = await import("../utils/logger.js").then(m => m.default);
   
   try {
     // Use notification router to send via email, SMS, webhook as configured
