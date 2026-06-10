@@ -1,21 +1,43 @@
+const mockFindById = jest.fn();
+const mockSendEmail = jest.fn();
+
+jest.mock('../../models/subscription');
+jest.mock('../../services/notificationRouter');
+jest.mock('../../config/database');
+
+jest.mock('../../models/users', () => {
+  return {
+    UserModel: jest.fn().mockImplementation(() => {
+      return {
+        findById: mockFindById,
+      };
+    }),
+  };
+});
+
+jest.mock('../../services/email', () => {
+  return {
+    EmailService: jest.fn().mockImplementation(() => {
+      return {
+        sendEmail: mockSendEmail,
+      };
+    }),
+    emailService: {
+      sendEmail: mockSendEmail,
+    },
+  };
+});
+
 import { handleSubscriptionFailure } from '../../queue/worker';
 import subscriptionModel from '../../models/subscription';
 import { notificationRouter } from '../../services/notificationRouter';
 import { emailService } from '../../services/email';
 import { queryWrite } from '../../config/database';
-import { UserModel } from '../../models/users';
-
-jest.mock('../../models/subscription');
-jest.mock('../../services/notificationRouter');
-jest.mock('../../services/email');
-jest.mock('../../models/users');
-jest.mock('../../config/database');
 
 const mockedSub = subscriptionModel as jest.Mocked<typeof subscriptionModel>;
 const mockedNotification = notificationRouter as jest.Mocked<typeof notificationRouter>;
 const mockedEmail = emailService as jest.Mocked<typeof emailService>;
 const mockedQueryWrite = queryWrite as jest.MockedFunction<any>;
-const mockedUserModel = UserModel as unknown as jest.Mock;
 
 describe('handleSubscriptionFailure', () => {
   beforeEach(() => {
@@ -40,10 +62,9 @@ describe('handleSubscriptionFailure', () => {
     mockedSub.incrementRetry = jest.fn().mockResolvedValueOnce({ retry_count: 5, max_retries: 5, retry_backoff_seconds: 10 } as any);
     mockedSub.recordAttempt = jest.fn().mockResolvedValueOnce(undefined as any);
     mockedSub.pause = jest.fn().mockResolvedValueOnce(undefined as any);
-    const mockFindUser = jest.fn().mockResolvedValueOnce({ email: 'merchant@example.com' } as any);
-    (UserModel as unknown as jest.Mock).mockImplementation(() => ({ findById: mockFindUser }));
+    mockFindById.mockResolvedValueOnce({ email: 'merchant@example.com' } as any);
     mockedNotification.routeSystemNotification = jest.fn().mockResolvedValue(undefined as any);
-    mockedEmail.sendEmail = jest.fn().mockResolvedValue(undefined as any);
+    mockSendEmail.mockResolvedValue(undefined as any);
 
     await handleSubscriptionFailure('sub2', 'tx2', 'error');
 

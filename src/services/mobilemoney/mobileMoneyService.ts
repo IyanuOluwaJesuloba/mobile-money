@@ -53,6 +53,6 @@ export interface MobileMoneyProvider {
 // but the compiled CommonJS artifact is committed and used throughout the app.
 // Re-export it here so TypeScript consumers can continue importing the module.
  
-const { MobileMoneyService } = require("./mobileMoneyService.js");
+const { MobileMoneyService } = require("./mobileMoneyService_impl.js");
 
 export { MobileMoneyService };

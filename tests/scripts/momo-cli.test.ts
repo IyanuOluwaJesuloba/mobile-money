@@ -1,18 +1,30 @@
-import { runCli, showHelp } from "../../src/scripts/momo-cli";
-import { pool } from "../../src/config/database";
-import { addTransactionJob } from "../../src/queue";
-import { TransactionStatus } from "../../src/models/transaction";
+const mockPoolQuery = jest.fn();
+const mockAddTransactionJob = jest.fn();
 
-// Mock pool.query and addTransactionJob
 jest.mock("../../src/config/database", () => ({
   pool: {
-    query: jest.fn(),
+    query: mockPoolQuery,
+  },
+}));
+
+jest.mock("../../src/config/database.js", () => ({
+  pool: {
+    query: mockPoolQuery,
   },
 }));
 
 jest.mock("../../src/queue", () => ({
-  addTransactionJob: jest.fn(),
+  addTransactionJob: mockAddTransactionJob,
 }));
+
+jest.mock("../../src/queue/index.js", () => ({
+  addTransactionJob: mockAddTransactionJob,
+}));
+
+import { runCli, showHelp } from "../../src/scripts/momo-cli";
+import { pool } from "../../src/config/database";
+import { addTransactionJob } from "../../src/queue";
+import { TransactionStatus } from "../../src/models/transaction";
 
 describe("momo-cli retry-batch", () => {
   let logSpy: jest.SpyInstance;

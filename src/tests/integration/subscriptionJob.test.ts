@@ -4,7 +4,17 @@ import { TransactionModel } from '../../models/transaction';
 import { addTransactionJob } from '../../queue/transactionQueue';
 
 jest.mock('../../models/subscription');
-jest.mock('../../models/transaction');
+jest.mock('../../models/transaction', () => {
+  if (!(global as any).mockCreate) {
+    (global as any).mockCreate = jest.fn();
+  }
+  const mockCreate = (global as any).mockCreate;
+  return {
+    TransactionModel: jest.fn().mockImplementation(() => ({
+      create: mockCreate,
+    })),
+  };
+});
 jest.mock('../../queue/transactionQueue');
 
 const mockedSubModel = subscriptionModel as jest.Mocked<typeof subscriptionModel>;
@@ -30,8 +40,8 @@ describe('runSubscriptionJob', () => {
       },
     ] as any);
 
-    const mockCreate = jest.fn().mockResolvedValueOnce({ id: 'tx1', phoneNumber: '123', provider: 'mtn', stellarAddress: '' });
-    (TransactionModel as unknown as jest.Mock).mockImplementation(() => ({ create: mockCreate }));
+    const mockCreate = (global as any).mockCreate;
+    mockCreate.mockResolvedValueOnce({ id: 'tx1', phoneNumber: '123', provider: 'mtn', stellarAddress: '' });
 
     mockedSubModel.recordAttempt = jest.fn().mockResolvedValue(undefined as any);
 

@@ -7,7 +7,7 @@ const paymentLinkModel = new PaymentLinkModel();
 const transactionModel = new TransactionModel();
 
 async function addTransactionJob(data: any, options?: any) {
-  const queue = await import("../queue/transactionQueue.js");
+  const queue = require("../queue/transactionQueue.js");
   return queue.addTransactionJob(data, options);
 }
 

@@ -78,11 +78,14 @@ import { createAdminSep10Router } from "./stellar/adminSep10";
 import tomlRouter from "./routes/toml";
 import feeStrategiesRouter from "./routes/feeStrategies";
 import crossChainRouter from "./routes/crossChain";
+import stellarRouter from "./routes/stellar";
 import reconciliationRoutes from "./routes/reconciliation";
 import accountingReconciliationRoutes from "./routes/accountingReconciliation";
 import exchangeRateBufferRoutes from "./routes/exchangeRateBuffers";
 import adminAssetRoutes from "./routes/admin/assets";
 import settingsRoutes from "./routes/settings";
+import { statementsRoutes } from "./routes/statements";
+import { paymentLinkRoutes } from "./routes/paymentLinkRoutes.js";
 import providerStatusRouter from "./routes/providerStatus";
 import { startHeartbeatService, stopHeartbeatService } from "./services/heartbeatService";
 import { startStellarExporter } from "./services/stellarExporter";
@@ -375,10 +378,13 @@ app.use("/api/users", userRoutes);
 app.use("/api/kyc", createKYCRoutes(pool));
 app.use("/api/fee-strategies", feeStrategiesRouter);
 app.use("/api/cross-chain", crossChainRouter);
+app.use("/api/stellar", stellarRouter);
 app.use("/api/reconciliation", reconciliationRoutes);
 app.use("/api/exchange-rate-buffers", exchangeRateBufferRoutes);
 app.use("/api/admin/assets", adminAssetRoutes);
 app.use("/api/settings", settingsRoutes);
+app.use("/api/statements", statementsRoutes);
+app.use("/", paymentLinkRoutes);
 
 // GDPR
 app.use("/api/gdpr", privacyRoutes);

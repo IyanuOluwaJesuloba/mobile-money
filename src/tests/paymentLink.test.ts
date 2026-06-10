@@ -39,6 +39,9 @@ jest.mock("../config/database", () => {
 jest.mock("../queue/transactionQueue", () => ({
   addTransactionJob: jest.fn<any>().mockResolvedValue({ id: "mock-job-id" }),
 }));
+jest.mock("../queue/transactionQueue.js", () => ({
+  addTransactionJob: jest.fn<any>().mockResolvedValue({ id: "mock-job-id" }),
+}));
 
 // Mock lockManager to bypass distributed lock acquisition/release and execute immediately
 jest.mock("../utils/lock", () => ({
@@ -149,7 +152,6 @@ describe("PaymentLinkGenerator", () => {
   beforeEach(() => {
     jest.clearAllMocks();
     jest.spyOn(console, "log").mockImplementation(() => {});
-    jest.spyOn(console, "error").mockImplementation(() => {});
   });
 
   afterEach(() => {
