@@ -22,7 +22,7 @@ const config: Config = {
 
   i18n: {
     defaultLocale: 'en',
-    locales: ['en'],
+    locales: ['en', 'fr'],
   },
 
   presets: [
@@ -44,6 +44,7 @@ const config: Config = {
       items: [
         { to: '/', label: 'Overview', position: 'left' },
         { to: '/api', label: 'Reference', position: 'left' },
+        { type: 'localeDropdown', position: 'right' },
         {
           href: 'https://github.com/sublime247/mobile-money',
           label: 'GitHub',
