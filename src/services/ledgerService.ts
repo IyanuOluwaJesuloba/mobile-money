@@ -128,49 +128,7 @@ export class LedgerService {
       client.release();
     }
   }
-    const client = await this.pool.connect();
-    
-    try {
-      await client.query('BEGIN');
-
-      // Validate entries
-      if (!entries || entries.length < 2) {
-        throw new Error('At least 2 entries required for double-entry');
-      }
-
-      // Calculate totals for client-side validation
-      const totalDebits = entries.reduce((sum, e) => sum + (e.debit_amount || 0), 0);
-      const totalCredits = entries.reduce((sum, e) => sum + (e.credit_amount || 0), 0);
-
-      if (Math.abs(totalDebits - totalCredits) > 0.0000001) {
-        throw new Error(
-          `Transaction not balanced: debits=${totalDebits} credits=${totalCredits}`
-        );
-      }
-
-      // Call the database function to post atomically
-      const result = await client.query(
-        `SELECT * FROM post_transaction($1, $2, $3, $4, $5)`,
-        [
-          referenceNumber,
-          description,
-          transactionId || null,
-          postedBy || null,
-          JSON.stringify(entries)
-        ]
-      );
-
-      await client.query('COMMIT');
-
-      return result.rows.map(row => ({
-        entry_id: row.entry_id,
-        account_code: row.account_code,
-        debit: parseFloat(row.debit),
-        credit: parseFloat(row.credit)
-      }));
-    } catch (error) {
-      await client.query('ROLLBACK');
-      throw error;
+/* Duplicate block removed */
 
   /**
    * Post a deposit transaction with currency conversion.
