@@ -44,6 +44,7 @@ const config: Config = {
       items: [
         { to: '/', label: 'Overview', position: 'left' },
         { to: '/api', label: 'Reference', position: 'left' },
+        { to: '/sandbox', label: 'Sandbox', position: 'left' },
         {
           href: 'https://github.com/sublime247/mobile-money',
           label: 'GitHub',
@@ -56,7 +57,10 @@ const config: Config = {
       links: [
         {
           title: 'Docs',
-          items: [{ label: 'API Reference', to: '/api' }],
+          items: [
+            { label: 'API Reference', to: '/api' },
+            { label: 'API Sandbox', to: '/sandbox' },
+          ],
         },
       ],
       copyright: `Copyright © ${new Date().getFullYear()} Mobile Money`,
