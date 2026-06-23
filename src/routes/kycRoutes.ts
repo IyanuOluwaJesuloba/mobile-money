@@ -5,6 +5,8 @@ import { authenticateToken } from "../middleware/auth";
 import { upload, uploadErrorMessages } from "../middleware/upload";
 import { uploadToS3 } from "../services/s3Upload";
 import { Request, Response } from "express";
+import { ERROR_CODES } from "../constants/errorCodes";
+import { createError } from "../middleware/errorHandler";
 
 const COMPLIANCE_OFFICER_ROLE = "compliance_officer";
 const REDACTED_FILE_URL = "[REDACTED]";
@@ -91,76 +93,80 @@ export const createKYCRoutes = (db: Pool): Router => {
   router.post("/documents", kycController.uploadDocument);
 
   // File upload to S3
-  router.post(
-    "/documents/upload",
-    annotateDocumentVisibility,
-    upload.single("document"),
-    async (req: Request, res: Response) => {
-      try {
-        const userId = req.jwtUser?.userId;
-        if (!userId) {
-          return res.status(401).json({ error: "User not authenticated" });
-        }
+ router.post(
+  "/documents/upload",
+  annotateDocumentVisibility,
+  upload.single("document"),
+  async (req: Request, res: Response) => {
+    try {
+      const userId = req.jwtUser?.userId;
+      if (!userId) {
+        throw createError(ERROR_CODES.UNAUTHORIZED, "User not authenticated", {
+          error: "User not authenticated",
+        });
+      }
 
-        // Get required metadata from request body first
-        const { applicant_id, document_type, document_side } = req.body;
+      // Get required metadata from request body first
+      const { applicant_id, document_type, document_side } = req.body;
 
-        if (!applicant_id) {
-          return res.status(400).json({
-            error: "applicant_id is required",
-          });
-        }
+      if (!applicant_id) {
+        throw createError(ERROR_CODES.INVALID_INPUT, "applicant_id is required", {
+          error: "applicant_id is required",
+        });
+      }
 
-        // Check if file was uploaded
-        if (!req.file) {
-          return res.status(400).json({
-            error: uploadErrorMessages.NO_FILE_UPLOADED,
-          });
-        }
+      // Check if file was uploaded
+      if (!req.file) {
+        throw createError(ERROR_CODES.INVALID_INPUT, uploadErrorMessages.NO_FILE_UPLOADED, {
+          error: uploadErrorMessages.NO_FILE_UPLOADED,
+        });
+      }
 
-        // Validate file
-        const validation = validateUploadFile(req.file);
-        if (!validation.valid) {
-          return res.status(400).json({
-            error: validation.error,
-          });
-        }
+      // Validate file
+      const validation = validateUploadFile(req.file);
+      if (!validation.valid) {
+        throw createError(ERROR_CODES.INVALID_INPUT, validation.error, {
+          error: validation.error,
+        });
+      }
 
-        // Verify user owns this applicant
-        const accessQuery = `
+      // Verify user owns this applicant
+      const accessQuery = `
         SELECT 1 FROM kyc_applicants 
         WHERE user_id = $1 AND applicant_id = $2
         LIMIT 1
       `;
-        const accessResult = await db.query(accessQuery, [
-          userId,
-          applicant_id,
-        ]);
+      const accessResult = await db.query(accessQuery, [
+        userId,
+        applicant_id,
+      ]);
 
-        if (accessResult.rows.length === 0) {
-          return res.status(403).json({ error: "Access denied" });
-        }
-
-        // Upload to S3
-        const uploadResult = await uploadToS3({
-          userId,
-          file: req.file,
-          metadata: {
-            applicantId: applicant_id,
-            documentType: document_type || "unknown",
-            documentSide: document_side || "front",
-          },
+      if (accessResult.rows.length === 0) {
+        throw createError(ERROR_CODES.FORBIDDEN, "Access denied", {
+          error: "Access denied",
         });
+      }
 
-        if (!uploadResult.success) {
-          return res.status(500).json({
-            error: uploadErrorMessages.UPLOAD_FAILED,
-            details: uploadResult.error,
-          });
-        }
+      // Upload to S3
+      const uploadResult = await uploadToS3({
+        userId,
+        file: req.file,
+        metadata: {
+          applicantId: applicant_id,
+          documentType: document_type || "unknown",
+          documentSide: document_side || "front",
+        },
+      });
 
-        // Store document reference in database
-        const insertQuery = `
+      if (!uploadResult.success) {
+        throw createError(ERROR_CODES.INTERNAL_ERROR, uploadErrorMessages.UPLOAD_FAILED, {
+          error: uploadErrorMessages.UPLOAD_FAILED,
+          details: uploadResult.error,
+        });
+      }
+
+      // Store document reference in database
+      const insertQuery = `
         INSERT INTO kyc_documents (
           user_id, 
           applicant_id, 
@@ -176,68 +182,73 @@ export const createKYCRoutes = (db: Pool): Router => {
         RETURNING id, file_url, created_at
       `;
 
-        const documentResult = await db.query(insertQuery, [
-          userId,
+      const documentResult = await db.query(insertQuery, [
+        userId,
+        applicant_id,
+        document_type || "unknown",
+        document_side || "front",
+        uploadResult.fileUrl,
+        uploadResult.key,
+        req.file.originalname,
+        req.file.size,
+        req.file.mimetype,
+      ]);
+
+      const canViewRaw = Boolean(res.locals.canViewRawKycUploads);
+
+      res.status(201).json({
+        success: true,
+        data: {
+          document_id: documentResult.rows[0].id,
+          file_url: canViewRaw
+            ? documentResult.rows[0].file_url
+            : REDACTED_FILE_URL,
           applicant_id,
-          document_type || "unknown",
-          document_side || "front",
-          uploadResult.fileUrl,
-          uploadResult.key,
-          req.file.originalname,
-          req.file.size,
-          req.file.mimetype,
-        ]);
+          uploaded_at: documentResult.rows[0].created_at,
+        },
+      });
+    } catch (error) {
+      console.error("Document upload error:", error);
 
-        const canViewRaw = Boolean(res.locals.canViewRawKycUploads);
-
-        res.status(201).json({
-          success: true,
-          data: {
-            document_id: documentResult.rows[0].id,
-            file_url: canViewRaw
-              ? documentResult.rows[0].file_url
-              : REDACTED_FILE_URL,
-            applicant_id,
-            uploaded_at: documentResult.rows[0].created_at,
-          },
-        });
-      } catch (error) {
-        console.error("Document upload error:", error);
-
-        // Handle multer errors
-        if (error instanceof Error) {
-          if (error.message.includes("File too large")) {
-            return res.status(400).json({
-              error: uploadErrorMessages.FILE_TOO_LARGE,
-            });
-          }
-          if (error.message.includes("Invalid file type")) {
-            return res.status(400).json({
-              error: uploadErrorMessages.INVALID_FILE_TYPE,
-            });
-          }
-        }
-
-        res.status(500).json({
-          error: "Failed to upload document",
-          message: error instanceof Error ? error.message : "Unknown error",
-        });
+      if ((error as any).statusCode) {
+        throw error;
       }
-    },
-  );
+
+      // Handle multer errors
+      if (error instanceof Error) {
+        if (error.message.includes("File too large")) {
+          throw createError(ERROR_CODES.INVALID_INPUT, uploadErrorMessages.FILE_TOO_LARGE, {
+            error: uploadErrorMessages.FILE_TOO_LARGE,
+          });
+        }
+        if (error.message.includes("Invalid file type")) {
+          throw createError(ERROR_CODES.INVALID_INPUT, uploadErrorMessages.INVALID_FILE_TYPE, {
+            error: uploadErrorMessages.INVALID_FILE_TYPE,
+          });
+        }
+      }
+
+      throw createError(ERROR_CODES.INTERNAL_ERROR, "Failed to upload document", {
+        message: error instanceof Error ? error.message : "Unknown error",
+      });
+    }
+  },
+);
 
   // Get user's uploaded documents
-  router.get(
-    "/documents",
-    annotateDocumentVisibility,
-    async (req: Request, res: Response) => {
-      try {
-        const userId = req.jwtUser?.userId;
-        if (!userId) {
-          return res.status(401).json({ error: "User not authenticated" });
-        }
+ router.get(
+  "/documents",
+  annotateDocumentVisibility,
+  async (req: Request, res: Response) => {
+    try {
+      const userId = req.jwtUser?.userId;
+      if (!userId) {
+        throw createError(ERROR_CODES.UNAUTHORIZED, "User not authenticated", {
+          error: "User not authenticated",
+        });
+      }
 
-        const query = `
+      const query = `
         SELECT 
           id,
           applicant_id,
@@ -253,25 +264,27 @@ export const createKYCRoutes = (db: Pool): Router => {
         ORDER BY created_at DESC
       `;
 
-        const result = await db.query(query, [userId]);
-        const canViewRaw = Boolean(res.locals.canViewRawKycUploads);
-        const documents = result.rows.map((row) =>
-          maskFileUrl(row, canViewRaw),
-        );
+      const result = await db.query(query, [userId]);
+      const canViewRaw = Boolean(res.locals.canViewRawKycUploads);
+      const documents = result.rows.map((row) =>
+        maskFileUrl(row, canViewRaw),
+      );
 
-        res.json({
-          success: true,
-          data: documents,
-        });
-      } catch (error) {
-        console.error("Get documents error:", error);
-        res.status(500).json({
-          error: "Failed to retrieve documents",
-          message: error instanceof Error ? error.message : "Unknown error",
-        });
+      res.json({
+        success: true,
+        data: documents,
+      });
+    } catch (error) {
+      console.error("Get documents error:", error);
+      if ((error as any).statusCode) {
+        throw error;
       }
-    },
-  );
+      throw createError(ERROR_CODES.INTERNAL_ERROR, "Failed to retrieve documents", {
+        message: error instanceof Error ? error.message : "Unknown error",
+      });
+    }
+  },
+);
 
   // Workflow management
   router.post("/workflow-runs", kycController.createWorkflowRun);

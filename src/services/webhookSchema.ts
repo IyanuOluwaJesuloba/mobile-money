@@ -3,7 +3,7 @@ import { z } from 'zod';
 export const webhookPayloadSchema = z.object({
   event: z.string(),
   timestamp: z.string(),
-  data: z.record(z.string()),
+  data: z.record(z.string(), z.string()),
 });
 
 export const flatWebhookPayloadSchema = z.object({

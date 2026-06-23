@@ -418,7 +418,7 @@ export class AMLService {
   private async recordAlert(alert: AMLAlert): Promise<void> {
     // Store in database for persistence
     try {
-      const { AMLAlertModel } = await import("../models/amlAlert");
+      const { AMLAlertModel } = await import("../models/amlAlert.js");
       const model = new AMLAlertModel();
       await model.create(alert);
 

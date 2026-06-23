@@ -1,7 +1,6 @@
 import { pool } from "../config/database";
 import { cachedQueryManager, CacheTags, QUERY_TTL_POLICIES } from "./cachedQueryManager";
 import { TransactionCacheInvalidation, CacheKeyGenerators } from "./cacheAside";
-import { logger } from "./logger";
 
 /**
  * Cached Transaction Service
@@ -25,11 +24,31 @@ export interface TransactionQueryParams {
 /**
  * Get user transaction history with caching
  */
+function generateTransactionCacheKey(
+  baseKey: string,
+  params: Omit<TransactionQueryParams, "userId"> = {},
+): string {
+  const paramsKeys = Object.keys(params).sort();
+  if (paramsKeys.length === 0) return baseKey;
+
+  const normalizedParams: Record<string, unknown> = {};
+  for (const key of paramsKeys) {
+    normalizedParams[key] = (params as any)[key];
+  }
+
+  const serialized = JSON.stringify(normalizedParams);
+  const suffix = Buffer.from(serialized).toString("base64");
+  return `${baseKey}:${suffix}`;
+}
+
 export async function getCachedUserTransactionHistory(
   userId: string,
   params: Omit<TransactionQueryParams, "userId"> = {},
 ) {
-  const cacheKey = CacheKeyGenerators.userTransactionHistory(userId);
+  const cacheKey = generateTransactionCacheKey(
+    CacheKeyGenerators.userTransactionHistory(userId),
+    params,
+  );
   const tags = [CacheTags.userHistory(userId), CacheTags.userTransaction(userId)];
   
   return cachedQueryManager.getOrFetch(
@@ -62,7 +81,10 @@ export async function getCachedTransactionCount(
   userId: string,
   params: Omit<TransactionQueryParams, "userId"> = {},
 ) {
-  const cacheKey = `${CacheKeyGenerators.userTransactionHistory(userId)}:count`;
+  const cacheKey = `${generateTransactionCacheKey(
+    CacheKeyGenerators.userTransactionHistory(userId),
+    params,
+  )}:count`;
   const tags = [CacheTags.userHistory(userId)];
   
   return cachedQueryManager.getOrFetch(
@@ -192,31 +214,30 @@ function buildTransactionQuery(params: TransactionQueryParams) {
 function buildCountQuery(params: TransactionQueryParams) {
   const values: any[] = [];
   const whereClauses: string[] = [];
-  let paramIndex = 1;
   
   if (params.userId) {
-    whereClauses.push(`user_id = $${paramIndex++}`);
     values.push(params.userId);
+    whereClauses.push(`user_id = $${values.length}`);
   }
   
   if (params.status) {
-    whereClauses.push(`status = $${paramIndex++}`);
     values.push(params.status);
+    whereClauses.push(`status = $${values.length}`);
   }
   
   if (params.provider) {
-    whereClauses.push(`provider = $${paramIndex++}`);
     values.push(params.provider);
+    whereClauses.push(`provider = $${values.length}`);
   }
   
   if (params.startDate) {
-    whereClauses.push(`created_at >= $${paramIndex++}`);
     values.push(params.startDate);
+    whereClauses.push(`created_at >= $${values.length}`);
   }
   
   if (params.endDate) {
-    whereClauses.push(`created_at <= $${paramIndex++}`);
     values.push(params.endDate);
+    whereClauses.push(`created_at <= $${values.length}`);
   }
   
   const whereClause = whereClauses.length > 0 ? `WHERE ${whereClauses.join(" AND ")}` : "";

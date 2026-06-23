@@ -3,6 +3,7 @@ import { Pool } from "pg";
 import express from "express";
 import { createKYCRoutes } from "../kycRoutes";
 import * as s3Upload from "../../services/s3Upload";
+import { errorHandler } from "../../middleware/errorHandler";
 
 const { validateFile: realValidateFile } = jest.requireActual(
   "../../services/s3Upload",
@@ -37,6 +38,7 @@ describe("KYC Document Upload", () => {
     app = express();
     app.use(express.json());
     app.use("/api/kyc", createKYCRoutes(mockPool));
+    app.use(errorHandler);
   });
 
   afterEach(() => {
