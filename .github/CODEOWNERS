@@ -1,0 +1,5 @@
+# CODEOWNERS file to restrict editing of critical files.
+# More info: https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
+
+# Only sublime247 can approve changes to the README.md
+/README.md @sublime247

@@ -41,7 +41,7 @@ export class DeveloperDashboardService {
       let count = 0;
       try {
         const raw = await redisClient.get(key);
-        count = raw ? parseInt(raw, 10) : 0;
+        count = raw ? parseInt(raw.toString(), 10) : 0;
       } catch {
         count = 0;
       }

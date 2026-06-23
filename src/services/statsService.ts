@@ -1,4 +1,5 @@
 import { pool } from "../config/database";
+import { calculateStellarReserve, ReserveInfo } from "../utils/stellarReserveCalculator";
 
 export interface GeneralStats {
   totalTransactions: number;
@@ -9,6 +10,10 @@ export interface GeneralStats {
 
 export interface ProviderStats {
   [provider: string]: number;
+}
+
+export interface SystemHealthDashboard {
+  stellarReserves: ReserveInfo[];
 }
 
 export class StatsService {
@@ -141,5 +146,34 @@ export class StatsService {
       period: r.period,
       volume: parseFloat(r.volume),
     }));
+  }
+
+  /**
+   * Get system health dashboard including Stellar reserves
+   */
+  async getSystemHealthDashboard(): Promise<SystemHealthDashboard> {
+    const keys = (process.env.HOT_WALLET_PUBLIC_KEYS || "")
+      .split(",")
+      .map((k) => k.trim())
+      .filter(Boolean);
+
+    const stellarReserves = await Promise.all(
+      keys.map((k) =>
+        calculateStellarReserve(k).catch((err) => {
+          console.error(`Failed to calculate reserve for ${k}:`, err);
+          return {
+            publicKey: k,
+            baseReserve: 0,
+            trustlineReserve: 0,
+            totalRequired: 0,
+            nativeBalance: 0,
+            availableBalance: 0,
+            isBelowThreshold: true,
+          };
+        })
+      )
+    );
+
+    return { stellarReserves };
   }
 }

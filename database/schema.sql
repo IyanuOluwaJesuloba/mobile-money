@@ -3,6 +3,7 @@ CREATE TABLE IF NOT EXISTS users (
   id            UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
   phone_number  VARCHAR(20) UNIQUE NOT NULL,
   kyc_level     VARCHAR(20) NOT NULL CHECK (kyc_level IN ('unverified', 'basic', 'full')),
+  mcc           VARCHAR(4) CHECK (mcc IS NULL OR mcc ~ '^[0-9]{4}$'),
   profile_url   TEXT,
   created_at    TIMESTAMP   NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at    TIMESTAMP   NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -27,14 +28,15 @@ CREATE TRIGGER users_updated_at
 
 -- Vaults table for vault management
 CREATE TABLE IF NOT EXISTS vaults (
-  id            UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+  id            UUID        DEFAULT gen_random_uuid(),
   name          VARCHAR(255) NOT NULL,
   description   TEXT,
   owner_id      UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   balance       DECIMAL(20, 7) NOT NULL DEFAULT 0,
   status        VARCHAR(20) NOT NULL CHECK (status IN ('active', 'inactive', 'locked')) DEFAULT 'active',
   created_at    TIMESTAMP   NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  updated_at    TIMESTAMP   NOT NULL DEFAULT CURRENT_TIMESTAMP
+  updated_at    TIMESTAMP   NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (id, owner_id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_vaults_owner_id ON vaults(owner_id);
@@ -57,34 +59,40 @@ CREATE TRIGGER vaults_updated_at
 
 -- Transactions table
 CREATE TABLE IF NOT EXISTS transactions (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  reference_number VARCHAR(25) UNIQUE NOT NULL,
+  id UUID DEFAULT gen_random_uuid(),
+  user_id UUID REFERENCES users(id),
+  reference_number VARCHAR(25) NOT NULL,
   type VARCHAR(10) NOT NULL CHECK (type IN ('deposit', 'withdraw')),
   amount DECIMAL(20, 7) NOT NULL,
   phone_number VARCHAR(20) NOT NULL,
   provider VARCHAR(20) NOT NULL,
   stellar_address VARCHAR(56) NOT NULL,
-  status VARCHAR(20) NOT NULL CHECK (status IN ('pending', 'completed', 'failed', 'cancelled')),
+  status VARCHAR(20) NOT NULL CHECK (status IN ('pending', 'completed', 'failed', 'cancelled', 'review', 'dispute', 'reversed', 'clawed_back')),
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+  updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (id, user_id),
+  UNIQUE (reference_number, user_id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_transactions_status ON transactions(status);
+CREATE INDEX IF NOT EXISTS idx_transactions_status_created_id ON transactions(status, created_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_transactions_stellar_address ON transactions(stellar_address);
 CREATE INDEX IF NOT EXISTS idx_transactions_created_at ON transactions(created_at);
+CREATE INDEX IF NOT EXISTS idx_transactions_created_id ON transactions(created_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_transactions_reference_number ON transactions(reference_number);
 CREATE INDEX IF NOT EXISTS idx_transactions_phone_number ON transactions(phone_number);
+CREATE INDEX IF NOT EXISTS idx_transactions_provider_created_id ON transactions(provider, created_at DESC, id DESC);
 
 -- Tags: array of short lowercase strings for categorization (e.g. "refund", "priority", "verified")
 ALTER TABLE transactions ADD COLUMN IF NOT EXISTS tags TEXT[] DEFAULT '{}';
 CREATE INDEX IF NOT EXISTS idx_transactions_tags ON transactions USING GIN (tags);
 
 -- Add user_id foreign key to link transactions to users for KYC-based daily limit tracking
-ALTER TABLE transactions 
-ADD COLUMN IF NOT EXISTS user_id UUID REFERENCES users(id);
+-- (user_id is now in the CREATE TABLE statement)
 
 CREATE INDEX IF NOT EXISTS idx_transactions_user_id ON transactions(user_id);
 CREATE INDEX IF NOT EXISTS idx_transactions_user_created ON transactions(user_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_transactions_user_created_id ON transactions(user_id, created_at DESC, id DESC);
 
 ALTER TABLE transactions
 ADD COLUMN IF NOT EXISTS webhook_delivery_status VARCHAR(20) NOT NULL DEFAULT 'pending'
@@ -105,14 +113,15 @@ ADD COLUMN IF NOT EXISTS webhook_last_error TEXT;
 
 -- Add vault_id to link transactions to vaults for vault-related transfers
 ALTER TABLE transactions 
-ADD COLUMN IF NOT EXISTS vault_id UUID REFERENCES vaults(id) ON DELETE SET NULL;
+ADD COLUMN IF NOT EXISTS vault_id UUID;
+ALTER TABLE transactions ADD FOREIGN KEY (vault_id, user_id) REFERENCES vaults(id, owner_id) ON DELETE SET NULL;
 
 CREATE INDEX IF NOT EXISTS idx_transactions_vault_id ON transactions(vault_id);
 
 -- AML Alerts table for persistent storage of Anti-Money Laundering alerts
 CREATE TABLE IF NOT EXISTS aml_alerts (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  transaction_id UUID NOT NULL REFERENCES transactions(id) ON DELETE CASCADE,
+  id UUID DEFAULT gen_random_uuid(),
+  transaction_id UUID NOT NULL,
   user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   severity VARCHAR(10) NOT NULL CHECK (severity IN ('medium', 'high')),
   status VARCHAR(20) NOT NULL CHECK (status IN ('pending_review', 'reviewed', 'dismissed')) DEFAULT 'pending_review',
@@ -122,7 +131,9 @@ CREATE TABLE IF NOT EXISTS aml_alerts (
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   reviewed_at TIMESTAMP,
   reviewed_by UUID REFERENCES users(id),
-  review_notes TEXT
+  review_notes TEXT,
+  PRIMARY KEY (id, user_id),
+  FOREIGN KEY (transaction_id, user_id) REFERENCES transactions(id, user_id) ON DELETE CASCADE
 );
 
 CREATE INDEX IF NOT EXISTS idx_aml_alerts_status ON aml_alerts(status);
@@ -148,13 +159,16 @@ CREATE TRIGGER aml_alerts_updated_at
 
 -- AML Alert Review History for audit trail
 CREATE TABLE IF NOT EXISTS aml_alert_review_history (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  alert_id UUID NOT NULL REFERENCES aml_alerts(id) ON DELETE CASCADE,
+  id UUID DEFAULT gen_random_uuid(),
+  alert_id UUID NOT NULL,
+  user_id UUID NOT NULL,
   previous_status VARCHAR(20) NOT NULL,
   new_status VARCHAR(20) NOT NULL,
   reviewed_by UUID NOT NULL REFERENCES users(id),
   review_notes TEXT,
-  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (id, user_id),
+  FOREIGN KEY (alert_id, user_id) REFERENCES aml_alerts(id, user_id) ON DELETE CASCADE
 );
 
 CREATE INDEX IF NOT EXISTS idx_aml_review_history_alert_id ON aml_alert_review_history(alert_id);

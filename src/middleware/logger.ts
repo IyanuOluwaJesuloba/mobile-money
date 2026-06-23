@@ -1,6 +1,6 @@
 import { Request, Response, NextFunction } from "express";
 import { UAParser } from "ua-parser-js";
-import { logStructured } from "../services/structuredLogger";
+import logger, { childLogger } from "../utils/logger";
 
 /**
  * Request pathname without query string (avoids logging ?api_key=…, ?token=…, etc.).
@@ -78,24 +78,26 @@ export function requestLogger(
     const durationNs = process.hrtime.bigint() - start;
     const responseTimeMs = Number(durationNs) / 1e6;
 
-    const line = {
-      timestamp: new Date().toISOString(),
+    // Propagate trace_id from the incoming request header when available so
+    // all log lines for a single request share the same distributed trace id.
+    const traceId =
+      (req.headers["x-trace-id"] as string | undefined) ??
+      (req.headers["x-request-id"] as string | undefined);
+
+    const reqLogger = traceId ? childLogger(traceId) : logger;
+
+    reqLogger.info({
+      event: { dataset: "http.request" },
       method: req.method,
       path: loggedPath(req),
       statusCode: res.statusCode,
       responseTimeMs: Math.round(responseTimeMs * 1000) / 1000,
       http: {
-        request: {
-          method: req.method,
-        },
-        response: {
-          status_code: res.statusCode,
-        },
+        request: { method: req.method },
+        response: { status_code: res.statusCode },
       },
       userAgent: parseUserAgent(req.headers["user-agent"]),
-    };
-
-    logStructured("info", line);
+    });
   };
 
   res.on("finish", writeLog);

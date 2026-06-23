@@ -25,6 +25,15 @@ export interface EmailOptions {
   }>;
 }
 
+export interface VulnerabilityReport {
+  total: number;
+  critical: number;
+  high: number;
+  moderate: number;
+  low: number;
+  info: number;
+}
+
 export class EmailService {
   private resolveTemplateId(
     baseEnvName: "SENDGRID_RECEIPT_TEMPLATE_ID" | "SENDGRID_FAILURE_TEMPLATE_ID",
@@ -61,8 +70,10 @@ export class EmailService {
     email: string,
     transaction: Transaction,
     locale = "en",
+    merchantDisplayName?: string | null,
   ): Promise<void> {
     const resolvedLocale = resolveLocale(locale);
+    const transactionHash = transaction.transactionHash;
     await this.sendEmail({
       to: email,
       templateId: this.resolveTemplateId(
@@ -80,6 +91,11 @@ export class EmailService {
         provider: transaction.provider.toUpperCase(),
         phoneNumber: transaction.phoneNumber,
         stellarAddress: transaction.stellarAddress,
+        transactionHash,
+        stellarExpertUrl: transactionHash
+          ? `https://stellar.expert/explorer/public/tx/${transactionHash}`
+          : undefined,
+        merchantDisplayName: merchantDisplayName ?? undefined,
         createdAt: new Date(transaction.createdAt).toLocaleString(resolvedLocale),
         locale: resolvedLocale,
         year: new Date().getFullYear(),
@@ -161,6 +177,7 @@ export class EmailService {
     transaction: Transaction,
     reason: string,
     locale = "en",
+    merchantDisplayName?: string | null,
   ): Promise<void> {
     const resolvedLocale = resolveLocale(locale);
     await this.sendEmail({
@@ -179,8 +196,74 @@ export class EmailService {
         referenceNumber: transaction.referenceNumber,
         reason,
         reasonLabel: translate("email.labels.reason", resolvedLocale),
+        merchantDisplayName: merchantDisplayName ?? undefined,
         locale: resolvedLocale,
         year: new Date().getFullYear(),
+      },
+    });
+  }
+
+  async sendSubscriptionPaused(email: string, subscriptionId: string, attempts: number, locale = "en") {
+    if (process.env.NODE_ENV === "test") {
+      console.log("Skipping subscription paused email in test environment");
+      return;
+    }
+    const templateId = process.env.SENDGRID_SUBSCRIPTION_PAUSED_TEMPLATE_ID;
+    const resolvedLocale = resolveLocale(locale);
+    if (templateId) {
+      await this.sendEmail({
+        to: email,
+        templateId,
+        dynamicTemplateData: {
+          subscriptionId,
+          attempts,
+          locale: resolvedLocale,
+          year: new Date().getFullYear(),
+        },
+      });
+    } else {
+      await this.sendEmail({
+        to: email,
+        templateId: process.env.SENDGRID_GENERAL_TEMPLATE_ID || "",
+        dynamicTemplateData: {
+          title: "Subscription Paused",
+          message: `Your subscription (${subscriptionId}) has been paused after ${attempts} failed attempts. Please review and resume if required.`,
+        },
+      });
+    }
+  }
+
+  async sendSubscriptionResumed(email: string, subscriptionId: string, locale = "en") {
+    if (process.env.NODE_ENV === "test") {
+      console.log("Skipping subscription resumed email in test environment");
+      return;
+    }
+    const templateId = process.env.SENDGRID_SUBSCRIPTION_RESUMED_TEMPLATE_ID;
+    const resolvedLocale = resolveLocale(locale);
+    await this.sendEmail({
+      to: email,
+      templateId: templateId || process.env.SENDGRID_GENERAL_TEMPLATE_ID || "",
+      dynamicTemplateData: {
+        subscriptionId,
+        locale: resolvedLocale,
+      },
+    });
+  }
+
+  async sendSubscriptionFailure(email: string, subscriptionId: string, reason: string, locale = "en") {
+    if (process.env.NODE_ENV === "test") {
+      console.log("Skipping subscription failure email in test environment");
+      return;
+    }
+    const templateId = process.env.SENDGRID_SUBSCRIPTION_FAILURE_TEMPLATE_ID;
+    const resolvedLocale = resolveLocale(locale);
+    await this.sendEmail({
+      to: email,
+      templateId: templateId || process.env.SENDGRID_GENERAL_TEMPLATE_ID || "",
+      dynamicTemplateData: {
+        subscriptionId,
+        reason,
+        locale: resolvedLocale,
       },
     });
   }
@@ -247,4 +330,53 @@ export class EmailService {
       });
     }
   }
+
+  async sendVulnerabilityReport(
+    email: string,
+    report: VulnerabilityReport,
+  ): Promise<void> {
+    const templateId = process.env.SENDGRID_VULNERABILITY_REPORT_TEMPLATE_ID;
+    const from = process.env.EMAIL_FROM || '"Mobile Money" <no-reply@mobilemoney.com>';
+
+    if (templateId) {
+      await this.sendEmail({
+        to: email,
+        templateId,
+        dynamicTemplateData: {
+          ...report,
+          reportDate: new Date().toLocaleDateString(),
+          year: new Date().getFullYear(),
+        },
+      });
+    } else {
+      // Fallback HTML
+      await sgMail.send({
+        from,
+        to: email,
+        subject: `Weekly Security Vulnerability Report - ${new Date().toLocaleDateString()}`,
+        html: `
+          <div style="font-family:sans-serif;max-width:600px;margin:0 auto;border:1px solid #eee;padding:20px;">
+            <h2 style="color:#2c3e50;border-bottom:2px solid #e74c3c;padding-bottom:10px;">Security Vulnerability Report</h2>
+            <p><strong>Date:</strong> ${new Date().toLocaleDateString()}</p>
+            
+            <div style="background:#f9f9f9;padding:15px;border-radius:5px;margin:20px 0;">
+              <h3 style="margin-top:0;color:#c0392b;">Summary</h3>
+              <table style="width:100%; font-size: 16px;">
+                <tr><td style="padding: 4px 0;">Total Vulnerabilities:</td><td style="text-align:right;"><strong>${report.total}</strong></td></tr>
+                <tr><td style="color:#c0392b; padding: 4px 0;">Critical:</td><td style="text-align:right;color:#c0392b;"><strong>${report.critical}</strong></td></tr>
+                <tr><td style="color:#e67e22; padding: 4px 0;">High:</td><td style="text-align:right;color:#e67e22;"><strong>${report.high}</strong></td></tr>
+                <tr><td style="color:#f39c12; padding: 4px 0;">Moderate:</td><td style="text-align:right;color:#f39c12;"><strong>${report.moderate}</strong></td></tr>
+                <tr><td style="color:#27ae60; padding: 4px 0;">Low:</td><td style="text-align:right;color:#27ae60;"><strong>${report.low}</strong></td></tr>
+              </table>
+            </div>
+            <p style="color:#999;font-size:12px;margin-top:30px;text-align:center;">
+              &copy; ${new Date().getFullYear()} Mobile Money. Automated Security Audit.
+            </p>
+          </div>
+        `,
+      });
+    }
+  }
 }
+
+export const emailService = new EmailService();

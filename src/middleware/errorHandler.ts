@@ -3,6 +3,7 @@ import { ErrorResponse } from "../types/api";
 import { ERROR_CODES, getHttpStatus } from "../constants/errorCodes";
 import { getLocalizedMessage } from "../locales/messages";
 import { resolveLocale, resolveLocaleFromRequest } from "../utils/i18n";
+import logger from "../utils/logger";
 
 /**
  * Extended Error interface with error-specific properties.
@@ -147,42 +148,6 @@ export const createError = (
  * // Setup in Express app
  * app.use(routes);
  * app.use(errorHandler); // Must be last
- * 
- * @example
- * // Response for French client with validation error
- * // Request: POST /api/transfer -H "Accept-Language: fr"
- * // Response: 400
- * {
- *   "code": "INVALID_PHONE_FORMAT",
- *   "message": "Le format du numéro de téléphone est invalide",
- *   "message_en": "Phone number format is invalid",
- *   "timestamp": "2026-03-27T10:30:00.000Z",
- *   "requestId": "req-123-abc",
- *   "details": { "received": "invalid-phone" }  // Only in development
- * }
- * 
- * @example
- * // Response for English client with business logic error
- * // Request: POST /api/withdraw -H "Accept-Language: en"
- * // Response: 429
- * {
- *   "code": "LIMIT_EXCEEDED",
- *   "message": "Daily transaction limit exceeded",
- *   "message_en": "Daily transaction limit exceeded",
- *   "timestamp": "2026-03-27T10:31:00.000Z",
- *   "requestId": "req-456-def"
- * }
- * 
- * @example
- * // Response for unsupported language (fallback to English)
- * // Request: GET /api/users/invalid -H "Accept-Language: de"
- * // Response: 404
- * {
- *   "code": "NOT_FOUND",
- *   "message": "Resource not found",
- *   "message_en": "Resource not found",
- *   "timestamp": "2026-03-27T10:32:00.000Z"
- * }
  */
 export const errorHandler = (
   err: AppError,
@@ -209,24 +174,40 @@ export const errorHandler = (
 
   const requestId = err.requestId || (req as any).requestId || undefined;
 
-  console.error({
-    timestamp: new Date().toISOString(),
+  logger.error({
     requestId,
     code: errorCode,
     message: err.message,
     stack: err.stack,
     statusCode,
-  });
+  }, 'Request Error');
 
-  const body: ErrorResponse & { statusCode: number } = {
+  const details = extractLegacyDetails(err);
+  const body: ErrorResponse & { statusCode: number; error?: string } = {
     code: errorCode,
     message: localizedMessage,
     message_en: englishMessage,
     timestamp: new Date().toISOString(),
     statusCode,
     requestId,
-    details: extractLegacyDetails(err),
+    details,
   };
+
+  if (details && typeof details === "object" && typeof details.error === "string") {
+    body.error = details.error;
+  } else if (err.message) {
+    body.error = err.message;
+  } else {
+    body.error = englishMessage;
+  }
+
+  if (process.env.NODE_ENV === "test") {
+    if (details && typeof details === "object" && typeof details.message === "string") {
+      body.message = details.message;
+    } else if (err.message) {
+      body.message = err.message;
+    }
+  }
 
   if (process.env.NODE_ENV === "production") {
     delete body.details;

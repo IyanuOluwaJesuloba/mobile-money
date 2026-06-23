@@ -1,7 +1,7 @@
 # docker-compose.yml
 #
 # Local development environment for sublime247/mobile-money.
-# Starts the app alongside Postgres, PgBouncer, Redis, and ELK stack with live-reload via ts-node.
+# Starts the app alongside Postgres, Redis, and local mock services for Stellar and SMTP.
 #
 # Usage:
 #   docker compose up          # start everything
@@ -9,203 +9,101 @@
 #   docker compose down        # stop and remove containers
 #   docker compose down -v     # stop and wipe volumes (fresh DB)
 
-services:
-  # ---------------------------------------------------------------------------
-  # PostgreSQL
-  # ---------------------------------------------------------------------------
-  postgres:
-    image: postgres:16-alpine
-    container_name: mobilemoney_postgres
-    restart: unless-stopped
-    environment:
-      POSTGRES_USER: user
-      POSTGRES_PASSWORD: password
-      POSTGRES_DB: mobilemoney_stellar
-    ports:
-      - "5432:5432"
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-      - ./database/schema.sql:/docker-entrypoint-initdb.d/01_schema.sql:ro
-      - ./database/migrations:/docker-entrypoint-initdb.d/migrations:ro
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U user -d mobilemoney_stellar"]
-      interval: 5s
-      timeout: 5s
-      retries: 10
+version: "3.9"
 
-  # ---------------------------------------------------------------------------
-  # PgBouncer Connection Pooler
-  # ---------------------------------------------------------------------------
-  pgbouncer:
-    image: edoburu/pgbouncer:latest
-    container_name: mobilemoney_pgbouncer
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    container_name: mobilemoney_app
     restart: unless-stopped
     depends_on:
       postgres:
         condition: service_healthy
+      redis:
+        condition: service_healthy
+    env_file:
+      - .env
     environment:
-      DATABASE_URL: postgres://user:password@postgres:5432/mobilemoney_stellar
-      POOL_MODE: transaction
-      MAX_CLIENT_CONN: 1000
-      DEFAULT_POOL_SIZE: 25
-      MIN_POOL_SIZE: 5
-      RESERVE_POOL_SIZE: 5
-      RESERVE_POOL_TIMEOUT: 3
-      MAX_DB_CONNECTIONS: 100
-      MAX_USER_CONNECTIONS: 100
-      SERVER_LIFETIME: 3600
-      SERVER_IDLE_TIMEOUT: 600
-      SERVER_CONNECT_TIMEOUT: 15
-      SERVER_CHECK_QUERY: "select 1"
-      SERVER_CHECK_DELAY: 30
-      SERVER_RESET_QUERY: "DISCARD ALL"
-      CLIENT_IDLE_TIMEOUT: 900
-      QUERY_TIMEOUT: 0
-      QUERY_WAIT_TIMEOUT: 120000
-      LOG_CONNECTIONS: 1
-      LOG_DISCONNECTIONS: 1
-      LOG_POOLER_ERRORS: 1
-      VERBOSE: 1
-      STATS_PERIOD: 60
-      DISABLE_STATISTICS: 0
-      TCP_DEFER_ACCEPT: 1
-      TCP_KEEPALIVES: 1
-      AUTH_TYPE: plain
+      NODE_ENV: development
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      DATABASE_URL: postgresql://user:password@postgres:5432/mobilemoney_stellar
+      REDIS_URL: redis://redis:6379
+      # Loki transport — optional, falls back to stdout when unset
+      LOKI_HOST: ${LOKI_HOST:-http://loki:3100}
+      SERVICE_NAME: ${SERVICE_NAME:-mobile-money-api}
     ports:
-      - "6432:5432"
+      - "3000:3000"
+    networks:
+      - mobilemoney_net
+    logging:
+      driver: "json-file"
+      options:
+        tag: "{{.Name}}"
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: mobilemoney_postgres
+    environment:
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: mobilemoney_stellar
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U user -h localhost -p 5432 -d mobilemoney_stellar || exit 1"]
+      test: ["CMD-SHELL", "pg_isready -U user -d mobilemoney_stellar"]
       interval: 5s
       timeout: 5s
-      retries: 10
+      retries: 5
+    networks:
+      - mobilemoney_net
 
-  # ---------------------------------------------------------------------------
-  # Redis
-  # ---------------------------------------------------------------------------
   redis:
     image: redis:7-alpine
     container_name: mobilemoney_redis
-    restart: unless-stopped
-    ports:
-      - "6379:6379"
+    command: redis-server /usr/local/etc/redis/redis.conf
     volumes:
+      - ./redis.conf:/usr/local/etc/redis/redis.conf:ro
       - redis_data:/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 3s
+      retries: 5
+    networks:
+      - mobilemoney_net
+
+  # ---------------------------------------------------------------------------
+  # Mock SMTP Server (Maildev)
+  # ---------------------------------------------------------------------------
+  maildev:
+    image: maildev/maildev:2.1.0
+    container_name: mobilemoney_maildev
+    restart: unless-stopped
+    ports:
+      - "1080:1080" # Web UI
+      - "1025:1025" # SMTP Port
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z localhost 1025 || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # ---------------------------------------------------------------------------
+  # Local Stellar Quickstart Node
+  # ---------------------------------------------------------------------------
+  stellar:
+    image: stellar/quickstart:latest
+    container_name: mobilemoney_stellar_quickstart
+    restart: unless-stopped
+    ports:
+      - "8000:8000" # Horizon API / Faucet (Friendbot)
+    command: ["--standalone", "--enable-horizon"]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000 || exit 1"]
+      interval: 10s
+      timeout: 5s
       retries: 10
-
-  # ---------------------------------------------------------------------------
-  # Datadog Agent
-  # ---------------------------------------------------------------------------
-  datadog-agent:
-    image: gcr.io/datadoghq/agent:latest
-    container_name: mobilemoney_datadog_agent
-    environment:
-      - DD_API_KEY=${DD_API_KEY}
-      - DD_SITE=datadoghq.com
-      - DD_APM_ENABLED=true
-      - DD_APM_NON_LOCAL_TRAFFIC=true
-      - DD_ENV=development
-    ports:
-      - "8126:8126"
-
-  # ---------------------------------------------------------------------------
-  # Elasticsearch
-  # ---------------------------------------------------------------------------
-  elasticsearch:
-    image: docker.elastic.co/elasticsearch/elasticsearch:8.12.2
-    container_name: mobilemoney_elasticsearch
-    restart: unless-stopped
-    environment:
-      discovery.type: single-node
-      xpack.security.enabled: "false"
-      ES_JAVA_OPTS: -Xms512m -Xmx512m
-    ports:
-      - "9200:9200"
-    volumes:
-      - elasticsearch_data:/usr/share/elasticsearch/data
-    healthcheck:
-      test:
-        [
-          "CMD-SHELL",
-          "curl -fsS http://localhost:9200/_cluster/health || exit 1",
-        ]
-      interval: 15s
-      timeout: 10s
-      retries: 20
-
-  # ---------------------------------------------------------------------------
-  # Logstash
-  # ---------------------------------------------------------------------------
-  logstash:
-    image: docker.elastic.co/logstash/logstash:8.12.2
-    container_name: mobilemoney_logstash
-    restart: unless-stopped
-    depends_on:
-      elasticsearch:
-        condition: service_healthy
-    ports:
-      - "5044:5044"
-    volumes:
-      - ./elk/logstash/pipeline:/usr/share/logstash/pipeline:ro
-      - ./elk/logstash/templates:/usr/share/logstash/templates:ro
-
-  # ---------------------------------------------------------------------------
-  # Filebeat
-  # ---------------------------------------------------------------------------
-  filebeat:
-    image: docker.elastic.co/beats/filebeat:8.12.2
-    container_name: mobilemoney_filebeat
-    user: root
-    restart: unless-stopped
-    depends_on:
-      logstash:
-        condition: service_started
-    command: ["filebeat", "-e", "--strict.perms=false"]
-    volumes:
-      - ./elk/filebeat/filebeat.yml:/usr/share/filebeat/filebeat.yml:ro
-      - app_logs:/var/log/mobile-money:ro
-
-  # ---------------------------------------------------------------------------
-  # Kibana
-  # ---------------------------------------------------------------------------
-  kibana:
-    image: docker.elastic.co/kibana/kibana:8.12.2
-    container_name: mobilemoney_kibana
-    restart: unless-stopped
-    environment:
-      ELASTICSEARCH_HOSTS: http://elasticsearch:9200
-      XPACK_SECURITY_ENABLED: "false"
-    depends_on:
-      elasticsearch:
-        condition: service_healthy
-    ports:
-      - "5601:5601"
-    volumes:
-      - kibana_data:/usr/share/kibana/data
-    healthcheck:
-      test:
-        ["CMD-SHELL", "curl -fsS http://localhost:5601/api/status || exit 1"]
-      interval: 20s
-      timeout: 10s
-      retries: 20
-
-  # ---------------------------------------------------------------------------
-  # Kibana Importer
-  # ---------------------------------------------------------------------------
-  kibana-importer:
-    image: curlimages/curl:8.7.1
-    container_name: mobilemoney_kibana_importer
-    restart: "no"
-    depends_on:
-      kibana:
-        condition: service_healthy
-    entrypoint: ["/bin/sh", "/scripts/import-kibana.sh"]
-    volumes:
-      - ./elk/scripts/import-kibana.sh:/scripts/import-kibana.sh:ro
-      - ./elk/kibana/mobile-money-dashboard.ndjson:/usr/share/kibana/import/mobile-money-dashboard.ndjson:ro
+      start_period: 30s
 
   # ---------------------------------------------------------------------------
   # Application (live reload via ts-node-dev)
@@ -219,43 +117,58 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-      pgbouncer:
-        condition: service_healthy
       redis:
         condition: service_healthy
-      elasticsearch:
+      maildev:
         condition: service_healthy
-      logstash:
-        condition: service_started
+      stellar:
+        condition: service_healthy
     env_file:
       - .env
     environment:
-      # Connect through PgBouncer instead of direct Postgres
-      DATABASE_URL: postgresql://user:password@pgbouncer:5432/mobilemoney_stellar
+      # Override the localhost URLs from .env to use Docker service names
+      DATABASE_URL: postgresql://user:password@postgres:5432/mobilemoney_stellar
       REDIS_URL: redis://redis:6379
-      LOG_FILE_PATH: /var/log/mobile-money/app.log
-      ELASTICSEARCH_URL: http://elasticsearch:9200
-      KIBANA_URL: http://kibana:5601
-      DD_AGENT_HOST: datadog-agent
-      DD_ENV: development
-      DD_SERVICE: mobile-money
-      DD_VERSION: 1.0.0
+      SMTP_HOST: maildev
+      SMTP_PORT: 1025
+      STELLAR_HORIZON_URL: http://stellar:8000
+      STELLAR_NETWORK: local
     ports:
-      - "${PORT:-3000}:3000"
+      - "3100:3100"
     volumes:
-      - .:/app
-      - /app/node_modules
-      - app_logs:/var/log/mobile-money
-    healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:3000/health || exit 1"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 15s
+      - ./logging/loki-config.yaml:/etc/loki/local-config.yaml
+    command: -config.file=/etc/loki/local-config.yaml
+    networks:
+      - mobilemoney_net
+
+  promtail:
+    image: grafana/promtail:latest
+    container_name: mobilemoney_promtail
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./logging/promtail-config.yaml:/etc/promtail/config.yml
+    command: -config.file=/etc/promtail/config.yml
+    networks:
+      - mobilemoney_net
+
+  grafana:
+    image: grafana/grafana:latest
+    container_name: mobilemoney_grafana
+    ports:
+      - "3001:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_PATHS_PROVISIONING=/etc/grafana/provisioning
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./logging/grafana/provisioning:/etc/grafana/provisioning
+    networks:
+      - mobilemoney_net
+
+networks:
+  mobilemoney_net:
+    driver: bridge
 
 volumes:
-  postgres_data:
+  grafana_data:
   redis_data:
-  app_logs:
-  elasticsearch_data:
-  kibana_data:

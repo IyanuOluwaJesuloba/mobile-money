@@ -1,11 +1,13 @@
 import * as StellarSdk from "stellar-sdk";
 import { getStellarServer } from "../config/stellar";
 import { notifySlackAlert } from "../services/loggers";
+import { calculateStellarReserve, formatReserveInfo } from "../utils/stellarReserveCalculator";
 
 /**
  * Balance Monitor Job
  * Schedule: Every 5 minutes (configurable via BALANCE_MONITOR_CRON)
  * Monitors Stellar hot wallet balances and alerts if below thresholds.
+ * Also warns admins if XLM reserve falls below threshold.
  */
 
 interface BalanceThreshold {
@@ -56,6 +58,15 @@ function getBalanceThresholds(): BalanceThreshold[] {
   return thresholds;
 }
 
+function getStellarMinimumBalanceThreshold(): number {
+  // Min XLM above reserve; prevent out of gas
+  const threshold = process.env.STELLAR_MIN_BALANCE_ABOVE_RESERVE;
+  const defaultValue = 5; // 5 XLM default
+  if (!threshold) return defaultValue;
+  const parsed = parseFloat(threshold);
+  return isNaN(parsed) ? defaultValue : parsed;
+}
+
 async function getWalletBalances(publicKey: string): Promise<WalletBalance> {
   const server = getStellarServer();
   try {
@@ -85,6 +96,7 @@ async function getWalletBalances(publicKey: string): Promise<WalletBalance> {
 async function checkBalancesAndAlert(): Promise<void> {
   const wallets = getHotWalletPublicKeys();
   const thresholds = getBalanceThresholds();
+  const minBalanceThreshold = getStellarMinimumBalanceThreshold();
 
   if (wallets.length === 0) {
     console.log("[balance-monitor] No hot wallets configured");
@@ -92,8 +104,7 @@ async function checkBalancesAndAlert(): Promise<void> {
   }
 
   if (thresholds.length === 0) {
-    console.log("[balance-monitor] No balance thresholds configured");
-    return;
+    console.log("[balance-monitor] No balance thresholds configured; checking reserve-only alerts");
   }
 
   console.log(`[balance-monitor] Checking ${wallets.length} wallets for ${thresholds.length} thresholds`);
@@ -131,6 +142,31 @@ async function checkBalancesAndAlert(): Promise<void> {
             `[balance-monitor] OK: Wallet ${walletKey} has ${balance.balance} ${threshold.asset} (threshold: ${threshold.threshold})`
           );
         }
+      }
+
+      // Check minimum reserve balance for Stellar
+      const reserveInfo = await calculateStellarReserve(walletKey, minBalanceThreshold);
+      if (reserveInfo.isBelowThreshold) {
+        console.warn(
+          `[balance-monitor] RESERVE WARNING: ${formatReserveInfo(reserveInfo)}`
+        );
+
+        // Alert admins
+        await notifySlackAlert({
+          statusCode: 500,
+          method: "MONITOR",
+          path: `/reserve/${walletKey}`,
+          timestamp: new Date().toISOString(),
+          error: new Error(
+            `Low XLM reserve alert: ${formatReserveInfo(reserveInfo)}`
+          ),
+        }, {
+          appName: "balance-monitor",
+        });
+      } else {
+        console.log(
+          `[balance-monitor] RESERVE OK: ${formatReserveInfo(reserveInfo)}`
+        );
       }
     } catch (error) {
       console.error(`[balance-monitor] Error checking wallet ${walletKey}:`, error);

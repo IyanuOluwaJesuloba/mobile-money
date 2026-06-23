@@ -23,6 +23,8 @@ export interface LocationMetadata {
   countryCode: string;
   city: string;
   isp: string;
+  lat: number;
+  lon: number;
   status: "resolved" | "unknown" | "pending";
 }
 
@@ -31,6 +33,8 @@ export const UNKNOWN_LOCATION: LocationMetadata = {
   countryCode: "XX",
   city: "Unknown",
   isp: "Unknown",
+  lat: 0,
+  lon: 0,
   status: "unknown",
 };
 
@@ -117,8 +121,8 @@ export class GeolocationService {
     // 2. API call
     try {
       const url = API_KEY
-        ? `${API_BASE}/${ip}?key=${API_KEY}&fields=status,country,countryCode,city,isp`
-        : `${API_BASE}/${ip}?fields=status,country,countryCode,city,isp`;
+        ? `${API_BASE}/${ip}?key=${API_KEY}&fields=status,country,countryCode,city,isp,lat,lon`
+        : `${API_BASE}/${ip}?fields=status,country,countryCode,city,isp,lat,lon`;
 
       const { data } = await axios.get<{
         status: string;
@@ -126,6 +130,8 @@ export class GeolocationService {
         countryCode?: string;
         city?: string;
         isp?: string;
+        lat?: number;
+        lon?: number;
         message?: string;
       }>(url, { timeout: API_TIMEOUT_MS });
 
@@ -142,6 +148,8 @@ export class GeolocationService {
         countryCode: data.countryCode || "XX",
         city: data.city || "Unknown",
         isp: data.isp || "Unknown",
+        lat: data.lat || 0,
+        lon: data.lon || 0,
         status: "resolved",
       };
 

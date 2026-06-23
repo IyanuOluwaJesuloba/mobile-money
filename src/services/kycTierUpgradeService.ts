@@ -31,6 +31,7 @@ export interface KycUpgradeRequest {
   reviewedBy: string | null;
   reviewedAt: Date | null;
   reviewNotes: string | null;
+  rejectionReason: string | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -300,7 +301,8 @@ export async function approveKycUpgrade(
        SET status       = 'approved',
            reviewed_by  = $1,
            reviewed_at  = CURRENT_TIMESTAMP,
-           review_notes = $2
+           review_notes = $2,
+           rejection_reason = NULL
        WHERE id = $3`,
       [reviewedBy, notes ?? null, requestId],
     );
@@ -325,6 +327,7 @@ export interface RejectUpgradeOptions {
   requestId: string;
   reviewedBy: string;
   notes?: string;
+  rejectionReason: string;
 }
 
 /**
@@ -333,17 +336,22 @@ export interface RejectUpgradeOptions {
 export async function rejectKycUpgrade(
   options: RejectUpgradeOptions,
 ): Promise<void> {
-  const { requestId, reviewedBy, notes } = options;
+  const { requestId, reviewedBy, notes, rejectionReason } = options;
+
+  if (!rejectionReason) {
+    throw new Error("Rejection reason is required when rejecting KYC");
+  }
 
   const result = await queryWrite(
     `UPDATE kyc_tier_upgrade_requests
-     SET status       = 'rejected',
-         reviewed_by  = $1,
-         reviewed_at  = CURRENT_TIMESTAMP,
-         review_notes = $2
-     WHERE id = $3
+     SET status           = 'rejected',
+         reviewed_by      = $1,
+         reviewed_at      = CURRENT_TIMESTAMP,
+         review_notes     = $2,
+         rejection_reason = $3
+     WHERE id = $4
        AND status IN ('pending', 'notified')`,
-    [reviewedBy, notes ?? null, requestId],
+    [reviewedBy, notes ?? null, rejectionReason ?? null, requestId],
   );
 
   if ((result.rowCount ?? 0) === 0) {
@@ -392,6 +400,7 @@ export async function listUpgradeRequests(filters: {
        r.reviewed_by       AS "reviewedBy",
        r.reviewed_at       AS "reviewedAt",
        r.review_notes      AS "reviewNotes",
+       r.rejection_reason  AS "rejectionReason",
        r.created_at        AS "createdAt",
        r.updated_at        AS "updatedAt"
      FROM kyc_tier_upgrade_requests r
@@ -414,6 +423,7 @@ export async function listUpgradeRequests(filters: {
     reviewedBy: row.reviewedBy as string | null,
     reviewedAt: row.reviewedAt as Date | null,
     reviewNotes: row.reviewNotes as string | null,
+    rejectionReason: row.rejectionReason as string | null,
     createdAt: row.createdAt as Date,
     updatedAt: row.updatedAt as Date,
   }));

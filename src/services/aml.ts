@@ -418,9 +418,22 @@ export class AMLService {
   private async recordAlert(alert: AMLAlert): Promise<void> {
     // Store in database for persistence
     try {
-      const { AMLAlertModel } = await import("../models/amlAlert");
+      const { AMLAlertModel } = await import("../models/amlAlert.js");
       const model = new AMLAlertModel();
       await model.create(alert);
+
+      // AUTOMATION: If severity is high, automatically prepare SAR draft
+      if (alert.severity === "high") {
+        console.log(`[SAR AUTO-PREPARE] High severity alert ${alert.id} detected. Preparing SAR...`);
+        try {
+          const { generateSAR } = require("../compliance/sar");
+          generateSAR(alert.userId, alert.id).catch((err: any) => {
+            console.error(`[SAR AUTO-PREPARE ERROR] Failed for alert ${alert.id}:`, err);
+          });
+        } catch (err) {
+          console.error(`[SAR AUTO-PREPARE ERROR] Failed to load sar service:`, err);
+        }
+      }
     } catch (error) {
       console.error("Failed to persist AML alert to database:", error);
       // Fallback to in-memory storage

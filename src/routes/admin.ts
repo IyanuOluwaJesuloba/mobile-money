@@ -1,6 +1,10 @@
 import { Router, Request, Response, NextFunction } from "express";
+import * as StellarSdk from "stellar-sdk";
 import { generateToken } from "../auth/jwt";
-import { updateAdminNotesHandler, refundTransactionHandler } from "../controllers/transactionController";
+import {
+  updateAdminNotesHandler,
+  refundTransactionHandler,
+} from "../controllers/transactionController";
 import {
   DashboardConfig,
   validateDashboardConfig,
@@ -15,14 +19,15 @@ import {
 import { MobileMoneyService } from "../services/mobilemoney/mobileMoneyService";
 import { getQueueStats } from "../queue/transactionQueue";
 import { redisClient } from "../config/redis";
-import { checkReplicaHealth, pool} from "../config/database";
+import { checkReplicaHealth, pool } from "../config/database";
 import { UserModel } from "../models/users";
-import { TransactionModel } from "../models/transaction";
+import { TransactionModel, TransactionStatus } from "../models/transaction";
+import { StellarService } from "../services/stellar/stellarService";
+import { ledgerService } from "../services/ledgerService";
+import highThroughputService from "../services/stellar/highThroughputService";
 import multer from "multer";
-import {
-  parseCSV,
-  reconcileTransactions,
-} from "../services/csvReconciliation";
+import { parseCSV, reconcileTransactions } from "../services/csvReconciliation";
+import { ProviderReconciliationService } from "../services/providerReconciliationService";
 import {
   getTransactionResolutionPercentiles,
   getDisputeResolutionPercentiles,
@@ -30,7 +35,20 @@ import {
   getDisputeResolutionTrends,
 } from "../services/metrics";
 import { dlqInspectorHandler } from "../queue/dlq";
-import { triggerManualTransfer, getLiquidityTransfers } from "../services/liquidityTransferService";
+import {
+  triggerManualTransfer,
+  getLiquidityTransfers,
+} from "../services/liquidityTransferService";
+import {
+  ComplianceDocumentModel,
+  ComplianceDocumentStatus,
+  ComplianceDocumentCreateInput,
+  ComplianceDocumentUpdateInput,
+} from "../models/complianceDocument";
+import { providerSettingsService } from "../services/providerSettingsService";
+import { resetCircuitBreakerForProvider } from "../utils/circuitBreaker";
+import { ERROR_CODES } from "../constants/errorCodes";
+import { createError } from "../middleware/errorHandler";
 
 const router = Router();
 const IMPERSONATION_TOKEN_EXPIRES_IN = "15m";
@@ -73,11 +91,37 @@ interface AuthRequest extends Request {
   user?: User;
 }
 
+type BulkActionResult = {
+  userId: string;
+  status: "success" | "failed";
+  message?: string;
+};
+
+type BulkTransactionActionResult = {
+  transactionId: string;
+  status: "success" | "failed";
+  message?: string;
+};
+
+const normalizeBulkIds = (value: unknown): string[] => {
+  if (!Array.isArray(value)) return [];
+
+  const ids = value
+    .filter((id): id is string => typeof id === "string")
+    .map((id) => id.trim())
+    .filter((id) => id.length > 0);
+
+  return Array.from(new Set(ids));
+};
+
+const MAX_BULK_IDS = 100;
+
 /**
  * Mock services (replace with real DB/services)
  */
 const users: User[] = [];
 const transactionModel = new TransactionModel();
+const complianceDocumentModel = new ComplianceDocumentModel();
 
 const isAdminRole = (role?: string) =>
   role === "admin" || role === "super-admin";
@@ -121,7 +165,9 @@ const requireAdmin = (req: Request, res: Response, next: NextFunction) => {
   const user = (req as AuthRequest).user;
 
   if (!user || !isAdminRole(user.role)) {
-    return res.status(403).json({ message: "Admin access required" });
+    throw createError(ERROR_CODES.FORBIDDEN, "Admin access required", {
+      message: "Admin access required",
+    });
   }
 
   next();
@@ -134,7 +180,7 @@ const requireSuperAdmin = (req: Request, res: Response, next: NextFunction) => {
     logImpersonationAuditEvent("IMPERSONATION_TOKEN_DENIED", req, {
       reason: "super_admin_required",
     });
-    return res.status(403).json({
+    throw createError(ERROR_CODES.FORBIDDEN, "Super-admin access required", {
       message: "Super-admin access required",
     });
   }
@@ -202,10 +248,247 @@ router.get(
       });
     } catch (err) {
       console.error("Error fetching transaction resolution metrics:", err);
-      res.status(500).json({
-        message: "Failed to retrieve transaction resolution metrics",
-        error: err instanceof Error ? err.message : "Unknown error",
+      throw createError(
+        ERROR_CODES.INTERNAL_ERROR,
+        "Failed to retrieve transaction resolution metrics",
+        {
+          message: err instanceof Error ? err.message : "Unknown error",
+        },
+      );
+    }
+  },
+);
+
+// POST /api/admin/users/bulk/freeze
+router.post(
+  "/users/bulk/freeze",
+  requireAdmin,
+  logAdminAction("BULK_FREEZE_USERS"),
+  async (req: Request, res: Response) => {
+    try {
+      const adminUser = (req as AuthRequest).user;
+      if (!adminUser) {
+        throw createError(ERROR_CODES.UNAUTHORIZED, "Authentication required", {
+          message: "Authentication required",
+        });
+      }
+
+      const { reason } = req.body;
+      if (!reason || typeof reason !== "string" || reason.trim().length === 0) {
+        throw createError(
+          ERROR_CODES.INVALID_INPUT,
+          "A reason is required for freezing an account",
+          {
+            message: "A reason is required for freezing an account",
+          },
+        );
+      }
+
+      const userIds = normalizeBulkIds(req.body?.userIds);
+      if (userIds.length === 0) {
+        throw createError(
+          ERROR_CODES.INVALID_INPUT,
+          "userIds must be a non-empty array of user IDs",
+          {
+            message: "userIds must be a non-empty array of user IDs",
+          },
+        );
+      }
+
+      if (userIds.length > MAX_BULK_IDS) {
+        throw createError(
+          ERROR_CODES.LIMIT_EXCEEDED,
+          `Too many userIds supplied (max ${MAX_BULK_IDS})`,
+          {
+            message: `Too many userIds supplied (max ${MAX_BULK_IDS})`,
+          },
+        );
+      }
+
+      const userModel = new UserModel();
+      const results: BulkActionResult[] = [];
+
+      for (const userId of userIds) {
+        try {
+          const user = await userModel.findById(userId);
+          if (!user) {
+            results.push({
+              userId,
+              status: "failed",
+              message: "User not found",
+            });
+            continue;
+          }
+
+          if (user.status === "frozen") {
+            results.push({
+              userId,
+              status: "failed",
+              message: "User account is already frozen",
+            });
+            continue;
+          }
+
+          const updatedUser = await userModel.updateStatus(
+            userId,
+            "frozen",
+            adminUser.id,
+            reason.trim(),
+            req.ip,
+            req.get("user-agent"),
+          );
+
+          if (!updatedUser) {
+            results.push({
+              userId,
+              status: "failed",
+              message: "Failed to freeze user account",
+            });
+            continue;
+          }
+
+          results.push({ userId, status: "success" });
+        } catch (error) {
+          results.push({
+            userId,
+            status: "failed",
+            message: error instanceof Error ? error.message : "Unknown error",
+          });
+        }
+      }
+
+      const succeeded = results.filter((r) => r.status === "success").length;
+      const failed = results.length - succeeded;
+
+      return res.json({
+        message: "Bulk freeze completed",
+        summary: {
+          total: results.length,
+          succeeded,
+          failed,
+        },
+        results,
       });
+    } catch (error) {
+      console.error("Error bulk freezing users:", error);
+      throw createError(ERROR_CODES.INTERNAL_ERROR, "Internal server error");
+    }
+  },
+);
+
+// POST /api/admin/users/bulk/unfreeze
+router.post(
+  "/users/bulk/unfreeze",
+  requireAdmin,
+  logAdminAction("BULK_UNFREEZE_USERS"),
+  async (req: Request, res: Response) => {
+    try {
+      const adminUser = (req as AuthRequest).user;
+      if (!adminUser) {
+        throw createError(ERROR_CODES.UNAUTHORIZED, "Authentication required", {
+          message: "Authentication required",
+        });
+      }
+
+      const { reason } = req.body;
+      if (!reason || typeof reason !== "string" || reason.trim().length === 0) {
+        throw createError(
+          ERROR_CODES.INVALID_INPUT,
+          "A reason is required for unfreezing an account",
+          {
+            message: "A reason is required for unfreezing an account",
+          },
+        );
+      }
+
+      const userIds = normalizeBulkIds(req.body?.userIds);
+      if (userIds.length === 0) {
+        throw createError(
+          ERROR_CODES.INVALID_INPUT,
+          "userIds must be a non-empty array of user IDs",
+          {
+            message: "userIds must be a non-empty array of user IDs",
+          },
+        );
+      }
+
+      if (userIds.length > MAX_BULK_IDS) {
+        throw createError(
+          ERROR_CODES.LIMIT_EXCEEDED,
+          `Too many userIds supplied (max ${MAX_BULK_IDS})`,
+          {
+            message: `Too many userIds supplied (max ${MAX_BULK_IDS})`,
+          },
+        );
+      }
+
+      const userModel = new UserModel();
+      const results: BulkActionResult[] = [];
+
+      for (const userId of userIds) {
+        try {
+          const user = await userModel.findById(userId);
+          if (!user) {
+            results.push({
+              userId,
+              status: "failed",
+              message: "User not found",
+            });
+            continue;
+          }
+
+          if (user.status !== "frozen") {
+            results.push({
+              userId,
+              status: "failed",
+              message: "User account is not frozen",
+            });
+            continue;
+          }
+
+          const updatedUser = await userModel.updateStatus(
+            userId,
+            "active",
+            adminUser.id,
+            reason.trim(),
+            req.ip,
+            req.get("user-agent"),
+          );
+
+          if (!updatedUser) {
+            results.push({
+              userId,
+              status: "failed",
+              message: "Failed to unfreeze user account",
+            });
+            continue;
+          }
+
+          results.push({ userId, status: "success" });
+        } catch (error) {
+          results.push({
+            userId,
+            status: "failed",
+            message: error instanceof Error ? error.message : "Unknown error",
+          });
+        }
+      }
+
+      const succeeded = results.filter((r) => r.status === "success").length;
+      const failed = results.length - succeeded;
+
+      return res.json({
+        message: "Bulk unfreeze completed",
+        summary: {
+          total: results.length,
+          succeeded,
+          failed,
+        },
+        results,
+      });
+    } catch (error) {
+      console.error("Error bulk unfreezing users:", error);
+      throw createError(ERROR_CODES.INTERNAL_ERROR, "Internal server error");
     }
   },
 );
@@ -230,10 +513,13 @@ router.get(
       });
     } catch (err) {
       console.error("Error fetching dispute resolution metrics:", err);
-      res.status(500).json({
-        message: "Failed to retrieve dispute resolution metrics",
-        error: err instanceof Error ? err.message : "Unknown error",
-      });
+      throw createError(
+        ERROR_CODES.INTERNAL_ERROR,
+        "Failed to retrieve dispute resolution metrics",
+        {
+          message: err instanceof Error ? err.message : "Unknown error",
+        },
+      );
     }
   },
 );
@@ -268,7 +554,9 @@ router.get(
     const user = users.find((u) => u.id === req.params.id);
 
     if (!user) {
-      return res.status(404).json({ message: "User not found" });
+      throw createError(ERROR_CODES.NOT_FOUND, "User not found", {
+        message: "User not found",
+      });
     }
 
     res.json(user);
@@ -290,7 +578,9 @@ router.post(
         targetUserId: req.params.id,
         reason: "target_user_not_found",
       });
-      return res.status(404).json({ message: "User not found" });
+      throw createError(ERROR_CODES.NOT_FOUND, "User not found", {
+        message: "User not found",
+      });
     }
 
     if (!actor) {
@@ -298,7 +588,9 @@ router.post(
         targetUserId: targetUser.id,
         reason: "missing_actor_context",
       });
-      return res.status(401).json({ message: "Authentication required" });
+      throw createError(ERROR_CODES.UNAUTHORIZED, "Authentication required", {
+        message: "Authentication required",
+      });
     }
 
     if (actor.id === targetUser.id) {
@@ -306,9 +598,13 @@ router.post(
         targetUserId: targetUser.id,
         reason: "self_impersonation_blocked",
       });
-      return res.status(400).json({
-        message: "Cannot generate an impersonation token for yourself",
-      });
+      throw createError(
+        ERROR_CODES.INVALID_INPUT,
+        "Cannot generate an impersonation token for yourself",
+        {
+          message: "Cannot generate an impersonation token for yourself",
+        },
+      );
     }
 
     if (!reason) {
@@ -316,9 +612,13 @@ router.post(
         targetUserId: targetUser.id,
         reason: "missing_support_reason",
       });
-      return res.status(400).json({
-        message: "A support reason is required for impersonation",
-      });
+      throw createError(
+        ERROR_CODES.INVALID_INPUT,
+        "A support reason is required for impersonation",
+        {
+          message: "A support reason is required for impersonation",
+        },
+      );
     }
 
     const email =
@@ -367,7 +667,84 @@ router.post(
   },
 );
 
-export default router;
+// POST /api/admin/users/bulk/unlock
+router.post(
+  "/users/bulk/unlock",
+  requireAdmin,
+  logAdminAction("BULK_UNLOCK_USERS"),
+  async (req: Request, res: Response) => {
+    try {
+      const adminUser = (req as AuthRequest).user;
+      if (!adminUser) {
+        throw createError(ERROR_CODES.UNAUTHORIZED, "Authentication required", {
+          message: "Authentication required",
+        });
+      }
+
+      const userIds = normalizeBulkIds(req.body?.userIds);
+      if (userIds.length === 0) {
+        throw createError(
+          ERROR_CODES.INVALID_INPUT,
+          "userIds must be a non-empty array of user IDs",
+          {
+            message: "userIds must be a non-empty array of user IDs",
+          },
+        );
+      }
+
+      if (userIds.length > MAX_BULK_IDS) {
+        throw createError(
+          ERROR_CODES.LIMIT_EXCEEDED,
+          `Too many userIds supplied (max ${MAX_BULK_IDS})`,
+          {
+            message: `Too many userIds supplied (max ${MAX_BULK_IDS})`,
+          },
+        );
+      }
+
+      const results: BulkActionResult[] = [];
+
+      for (const userId of userIds) {
+        try {
+          const user = users.find((u) => u.id === userId);
+          if (!user) {
+            results.push({
+              userId,
+              status: "failed",
+              message: "User not found",
+            });
+            continue;
+          }
+
+          user.locked = false;
+          results.push({ userId, status: "success" });
+        } catch (error) {
+          results.push({
+            userId,
+            status: "failed",
+            message: error instanceof Error ? error.message : "Unknown error",
+          });
+        }
+      }
+
+      const succeeded = results.filter((r) => r.status === "success").length;
+      const failed = results.length - succeeded;
+
+      return res.json({
+        message: "Bulk unlock completed",
+        summary: {
+          total: results.length,
+          succeeded,
+          failed,
+        },
+        results,
+      });
+    } catch (error) {
+      console.error("Error bulk unlocking users:", error);
+      throw createError(ERROR_CODES.INTERNAL_ERROR, "Internal server error");
+    }
+  },
+);
 
 // PUT /api/admin/users/:id
 router.put(
@@ -378,7 +755,9 @@ router.put(
     const user = users.find((u) => u.id === req.params.id);
 
     if (!user) {
-      return res.status(404).json({ message: "User not found" });
+      throw createError(ERROR_CODES.NOT_FOUND, "User not found", {
+        message: "User not found",
+      });
     }
 
     Object.assign(user, req.body);
@@ -396,7 +775,9 @@ router.post(
     const user = users.find((u) => u.id === req.params.id);
 
     if (!user) {
-      return res.status(404).json({ message: "User not found" });
+      throw createError(ERROR_CODES.NOT_FOUND, "User not found", {
+        message: "User not found",
+      });
     }
 
     user.locked = false;
@@ -417,14 +798,20 @@ router.post(
       const adminUser = (req as AuthRequest).user;
 
       if (!adminUser) {
-        return res.status(401).json({ message: "Authentication required" });
+        throw createError(ERROR_CODES.UNAUTHORIZED, "Authentication required", {
+          message: "Authentication required",
+        });
       }
 
       // Validate reason
       if (!reason || typeof reason !== "string" || reason.trim().length === 0) {
-        return res.status(400).json({
-          message: "A reason is required for freezing an account",
-        });
+        throw createError(
+          ERROR_CODES.INVALID_INPUT,
+          "A reason is required for freezing an account",
+          {
+            message: "A reason is required for freezing an account",
+          },
+        );
       }
 
       const userModel = new UserModel();
@@ -432,14 +819,20 @@ router.post(
       // Check if user exists
       const user = await userModel.findById(userId);
       if (!user) {
-        return res.status(404).json({ message: "User not found" });
+        throw createError(ERROR_CODES.NOT_FOUND, "User not found", {
+          message: "User not found",
+        });
       }
 
       // Check if already frozen
       if (user.status === "frozen") {
-        return res.status(400).json({
-          message: "User account is already frozen",
-        });
+        throw createError(
+          ERROR_CODES.CONFLICT,
+          "User account is already frozen",
+          {
+            message: "User account is already frozen",
+          },
+        );
       }
 
       // Freeze the user
@@ -453,9 +846,13 @@ router.post(
       );
 
       if (!updatedUser) {
-        return res
-          .status(500)
-          .json({ message: "Failed to freeze user account" });
+        throw createError(
+          ERROR_CODES.INTERNAL_ERROR,
+          "Failed to freeze user account",
+          {
+            message: "Failed to freeze user account",
+          },
+        );
       }
 
       console.log(`[ADMIN] User account frozen: ${userId}`, {
@@ -474,7 +871,7 @@ router.post(
       });
     } catch (error) {
       console.error("Error freezing user account:", error);
-      res.status(500).json({ message: "Internal server error" });
+      throw createError(ERROR_CODES.INTERNAL_ERROR, "Internal server error");
     }
   },
 );
@@ -491,14 +888,20 @@ router.post(
       const adminUser = (req as AuthRequest).user;
 
       if (!adminUser) {
-        return res.status(401).json({ message: "Authentication required" });
+        throw createError(ERROR_CODES.UNAUTHORIZED, "Authentication required", {
+          message: "Authentication required",
+        });
       }
 
       // Validate reason
       if (!reason || typeof reason !== "string" || reason.trim().length === 0) {
-        return res.status(400).json({
-          message: "A reason is required for unfreezing an account",
-        });
+        throw createError(
+          ERROR_CODES.INVALID_INPUT,
+          "A reason is required for unfreezing an account",
+          {
+            message: "A reason is required for unfreezing an account",
+          },
+        );
       }
 
       const userModel = new UserModel();
@@ -506,12 +909,14 @@ router.post(
       // Check if user exists
       const user = await userModel.findById(userId);
       if (!user) {
-        return res.status(404).json({ message: "User not found" });
+        throw createError(ERROR_CODES.NOT_FOUND, "User not found", {
+          message: "User not found",
+        });
       }
 
       // Check if not frozen
       if (user.status !== "frozen") {
-        return res.status(400).json({
+        throw createError(ERROR_CODES.CONFLICT, "User account is not frozen", {
           message: "User account is not frozen",
         });
       }
@@ -527,9 +932,13 @@ router.post(
       );
 
       if (!updatedUser) {
-        return res
-          .status(500)
-          .json({ message: "Failed to unfreeze user account" });
+        throw createError(
+          ERROR_CODES.INTERNAL_ERROR,
+          "Failed to unfreeze user account",
+          {
+            message: "Failed to unfreeze user account",
+          },
+        );
       }
 
       console.log(`[ADMIN] User account unfrozen: ${userId}`, {
@@ -548,7 +957,7 @@ router.post(
       });
     } catch (error) {
       console.error("Error unfreezing user account:", error);
-      res.status(500).json({ message: "Internal server error" });
+      throw createError(ERROR_CODES.INTERNAL_ERROR, "Internal server error");
     }
   },
 );
@@ -566,7 +975,9 @@ router.get(
       // Check if user exists
       const user = await userModel.findById(userId);
       if (!user) {
-        return res.status(404).json({ message: "User not found" });
+        throw createError(ERROR_CODES.NOT_FOUND, "User not found", {
+          message: "User not found",
+        });
       }
 
       const auditHistory = await userModel.getAuditHistory(userId);
@@ -578,7 +989,7 @@ router.get(
       });
     } catch (error) {
       console.error("Error fetching user status history:", error);
-      res.status(500).json({ message: "Internal server error" });
+      throw createError(ERROR_CODES.INTERNAL_ERROR, "Internal server error");
     }
   },
 );
@@ -598,7 +1009,9 @@ router.get(
     const user = users.find((u) => u.id === req.params.id);
 
     if (!user) {
-      return res.status(404).json({ message: "User not found" });
+      throw createError(ERROR_CODES.NOT_FOUND, "User not found", {
+        message: "User not found",
+      });
     }
 
     const config = user.dashboard_config || {
@@ -622,17 +1035,23 @@ router.put(
     const user = users.find((u) => u.id === req.params.id);
 
     if (!user) {
-      return res.status(404).json({ message: "User not found" });
+      throw createError(ERROR_CODES.NOT_FOUND, "User not found", {
+        message: "User not found",
+      });
     }
 
     const { config } = req.body;
 
     // Validate the dashboard config against the JSON schema
     if (!validateDashboardConfig(config)) {
-      return res.status(400).json({
-        message: "Invalid dashboard configuration",
-        errors: DASHBOARD_CONFIG_VALIDATION_ERRORS,
-      });
+      throw createError(
+        ERROR_CODES.INVALID_INPUT,
+        "Invalid dashboard configuration",
+        {
+          message: "Invalid dashboard configuration",
+          errors: DASHBOARD_CONFIG_VALIDATION_ERRORS,
+        },
+      );
     }
 
     // Save the configuration
@@ -681,7 +1100,13 @@ router.get(
         filters.referenceNumber = reference;
       }
 
-      const transactions = await transactionModel.list(limit, offset, undefined, undefined, filters);
+      const transactions = await transactionModel.list(
+        limit,
+        offset,
+        undefined,
+        undefined,
+        filters,
+      );
       const total = await transactionModel.count(undefined, undefined, filters);
 
       res.json({
@@ -695,7 +1120,13 @@ router.get(
       });
     } catch (err) {
       console.error("Error listing transactions for admin:", err);
-      res.status(500).json({ error: "Failed to list transactions" });
+      throw createError(
+        ERROR_CODES.INTERNAL_ERROR,
+        "Failed to list transactions",
+        {
+          error: "Failed to list transactions",
+        },
+      );
     }
   },
 );
@@ -711,14 +1142,19 @@ router.put(
       const tx = await transactionModel.findById(req.params.id);
 
       if (!tx) {
-        return res.status(404).json({ message: "Transaction not found" });
+        throw createError(ERROR_CODES.NOT_FOUND, "Transaction not found", {
+          message: "Transaction not found",
+        });
       }
 
       // Basic update logic - in a real app this would be more specific
       if (req.body.admin_notes) {
-        await transactionModel.updateAdminNotes(req.params.id, req.body.admin_notes);
+        await transactionModel.updateAdminNotes(
+          req.params.id,
+          req.body.admin_notes,
+        );
       }
-      
+
       if (req.body.status) {
         await transactionModel.updateStatus(req.params.id, req.body.status);
       }
@@ -727,7 +1163,10 @@ router.put(
       res.json({ message: "Transaction updated", transaction: updatedTx });
     } catch (err) {
       console.error("Error updating transaction:", err);
-      res.status(500).json({ error: "Failed to update transaction" });
+      throw createError(
+        ERROR_CODES.INTERNAL_ERROR,
+        "Failed to update transaction",
+      );
     }
   },
 );
@@ -748,6 +1187,294 @@ router.post(
   refundTransactionHandler,
 );
 
+// PATCH /api/admin/transactions/bulk/notes
+router.patch(
+  "/transactions/bulk/notes",
+  requireAdmin,
+  logAdminAction("BULK_UPDATE_TRANSACTION_ADMIN_NOTES"),
+  async (req: Request, res: Response) => {
+    try {
+      const adminUser = (req as AuthRequest).user;
+      if (!adminUser) {
+        throw createError(ERROR_CODES.UNAUTHORIZED, "Authentication required", {
+          message: "Authentication required",
+        });
+      }
+
+      const { admin_notes: adminNotes } = req.body;
+      if (typeof adminNotes !== "string") {
+        throw createError(
+          ERROR_CODES.INVALID_INPUT,
+          "admin_notes must be a string",
+          {
+            message: "admin_notes must be a string",
+          },
+        );
+      }
+
+      const transactionIds = normalizeBulkIds(req.body?.transactionIds);
+      if (transactionIds.length === 0) {
+        throw createError(
+          ERROR_CODES.INVALID_INPUT,
+          "transactionIds must be a non-empty array of transaction IDs",
+          {
+            message:
+              "transactionIds must be a non-empty array of transaction IDs",
+          },
+        );
+      }
+
+      if (transactionIds.length > MAX_BULK_IDS) {
+        throw createError(
+          ERROR_CODES.LIMIT_EXCEEDED,
+          `Too many transactionIds supplied (max ${MAX_BULK_IDS})`,
+          {
+            message: `Too many transactionIds supplied (max ${MAX_BULK_IDS})`,
+          },
+        );
+      }
+
+      const results: BulkTransactionActionResult[] = [];
+
+      for (const transactionId of transactionIds) {
+        try {
+          const tx = await transactionModel.findById(transactionId);
+          if (!tx) {
+            results.push({
+              transactionId,
+              status: "failed",
+              message: "Transaction not found",
+            });
+            continue;
+          }
+
+          await transactionModel.updateAdminNotes(transactionId, adminNotes);
+          results.push({ transactionId, status: "success" });
+        } catch (error) {
+          results.push({
+            transactionId,
+            status: "failed",
+            message: error instanceof Error ? error.message : "Unknown error",
+          });
+        }
+      }
+
+      const succeeded = results.filter((r) => r.status === "success").length;
+      const failed = results.length - succeeded;
+
+      return res.json({
+        message: "Bulk admin notes update completed",
+        summary: { total: results.length, succeeded, failed },
+        results,
+      });
+    } catch (error) {
+      console.error("Error bulk updating transaction admin notes:", error);
+      throw createError(ERROR_CODES.INTERNAL_ERROR, "Internal server error");
+    }
+  },
+);
+
+// PATCH /api/admin/transactions/bulk/status
+router.patch(
+  "/transactions/bulk/status",
+  requireAdmin,
+  logAdminAction("BULK_UPDATE_TRANSACTION_STATUS"),
+  async (req: Request, res: Response) => {
+    try {
+      const adminUser = (req as AuthRequest).user;
+      if (!adminUser) {
+        throw createError(ERROR_CODES.UNAUTHORIZED, "Authentication required", {
+          message: "Authentication required",
+        });
+      }
+
+      const { status } = req.body;
+      const allowed = Object.values(TransactionStatus) as string[];
+      if (typeof status !== "string" || !allowed.includes(status)) {
+        throw createError(
+          ERROR_CODES.INVALID_INPUT,
+          `status must be one of: ${allowed.join(", ")}`,
+          {
+            message: `status must be one of: ${allowed.join(", ")}`,
+          },
+        );
+      }
+
+      const transactionIds = normalizeBulkIds(req.body?.transactionIds);
+      if (transactionIds.length === 0) {
+        throw createError(
+          ERROR_CODES.INVALID_INPUT,
+          "transactionIds must be a non-empty array of transaction IDs",
+          {
+            message:
+              "transactionIds must be a non-empty array of transaction IDs",
+          },
+        );
+      }
+
+      if (transactionIds.length > MAX_BULK_IDS) {
+        throw createError(
+          ERROR_CODES.LIMIT_EXCEEDED,
+          `Too many transactionIds supplied (max ${MAX_BULK_IDS})`,
+          {
+            message: `Too many transactionIds supplied (max ${MAX_BULK_IDS})`,
+          },
+        );
+      }
+
+      const results: BulkTransactionActionResult[] = [];
+
+      for (const transactionId of transactionIds) {
+        try {
+          const tx = await transactionModel.findById(transactionId);
+          if (!tx) {
+            results.push({
+              transactionId,
+              status: "failed",
+              message: "Transaction not found",
+            });
+            continue;
+          }
+
+          await transactionModel.updateStatus(
+            transactionId,
+            status as TransactionStatus,
+          );
+          results.push({ transactionId, status: "success" });
+        } catch (error) {
+          results.push({
+            transactionId,
+            status: "failed",
+            message: error instanceof Error ? error.message : "Unknown error",
+          });
+        }
+      }
+
+      const succeeded = results.filter((r) => r.status === "success").length;
+      const failed = results.length - succeeded;
+
+      return res.json({
+        message: "Bulk status update completed",
+        summary: { total: results.length, succeeded, failed },
+        results,
+      });
+    } catch (error) {
+      console.error("Error bulk updating transaction status:", error);
+      throw createError(ERROR_CODES.INTERNAL_ERROR, "Internal server error");
+    }
+  },
+);
+// POST /api/admin/transactions/bulk/refund
+router.post(
+  "/transactions/bulk/refund",
+  requireAdmin,
+  logAdminAction("BULK_REFUND_TRANSACTIONS"),
+  async (req: Request, res: Response) => {
+    try {
+      const adminUser = (req as AuthRequest).user;
+      if (!adminUser) {
+        throw createError(ERROR_CODES.UNAUTHORIZED, "Authentication required", {
+          message: "Authentication required",
+        });
+      }
+
+      const transactionIds = normalizeBulkIds(req.body?.transactionIds);
+      if (transactionIds.length === 0) {
+        throw createError(
+          ERROR_CODES.INVALID_INPUT,
+          "transactionIds must be a non-empty array of transaction IDs",
+          {
+            message:
+              "transactionIds must be a non-empty array of transaction IDs",
+          },
+        );
+      }
+
+      if (transactionIds.length > MAX_BULK_IDS) {
+        throw createError(
+          ERROR_CODES.LIMIT_EXCEEDED,
+          `Too many transactionIds supplied (max ${MAX_BULK_IDS})`,
+          {
+            message: `Too many transactionIds supplied (max ${MAX_BULK_IDS})`,
+          },
+        );
+      }
+
+      const { calculateFee } = await import("../utils/fees.js");
+      const results: BulkTransactionActionResult[] = [];
+
+      for (const transactionId of transactionIds) {
+        try {
+          const transaction = await transactionModel.findById(transactionId);
+          if (!transaction) {
+            results.push({
+              transactionId,
+              status: "failed",
+              message: "Transaction not found",
+            });
+            continue;
+          }
+
+          if (transaction.type !== "withdraw") {
+            results.push({
+              transactionId,
+              status: "failed",
+              message: "Only withdrawal transactions can be refunded",
+            });
+            continue;
+          }
+
+          if (transaction.status !== TransactionStatus.Failed) {
+            results.push({
+              transactionId,
+              status: "failed",
+              message: `Cannot refund transaction with status '${transaction.status}'. Only failed transactions are eligible.`,
+            });
+            continue;
+          }
+
+          const amount = parseFloat(transaction.amount);
+          const { fee } = await calculateFee(amount);
+          const refundAmount = parseFloat((amount - fee).toFixed(2));
+          if (refundAmount <= 0) {
+            results.push({
+              transactionId,
+              status: "failed",
+              message: "Refund amount after fees is zero or negative",
+            });
+            continue;
+          }
+
+          await transactionModel.updateStatus(
+            transactionId,
+            TransactionStatus.Completed,
+          );
+
+          results.push({ transactionId, status: "success" });
+        } catch (error) {
+          results.push({
+            transactionId,
+            status: "failed",
+            message: error instanceof Error ? error.message : "Unknown error",
+          });
+        }
+      }
+
+      const succeeded = results.filter((r) => r.status === "success").length;
+      const failed = results.length - succeeded;
+
+      return res.json({
+        message: "Bulk refund completed",
+        summary: { total: results.length, succeeded, failed },
+        results,
+      });
+    } catch (error) {
+      console.error("Error bulk refunding transactions:", error);
+      throw createError(ERROR_CODES.INTERNAL_ERROR, "Internal server error");
+    }
+  },
+);
+
 /**
  * =========================
  * QUEUES & DLQ
@@ -755,7 +1482,12 @@ router.post(
  */
 
 // GET /api/admin/queues/dlq
-router.get("/queues/dlq", requireAdmin, logAdminAction("VIEW_DLQ"), dlqInspectorHandler);
+router.get(
+  "/queues/dlq",
+  requireAdmin,
+  logAdminAction("VIEW_DLQ"),
+  dlqInspectorHandler,
+);
 
 /**
  * =========================
@@ -776,7 +1508,10 @@ router.get(
       res.json({ transfers });
     } catch (err) {
       console.error("[liquidity] Failed to list transfers:", err);
-      res.status(500).json({ message: "Failed to retrieve liquidity transfers" });
+      throw createError(
+        ERROR_CODES.INTERNAL_ERROR,
+        "Failed to retrieve liquidity transfers",
+      );
     }
   },
 );
@@ -791,23 +1526,51 @@ router.post(
       const { fromProvider, toProvider, amount, note } = req.body;
       const admin = (req as AuthRequest).user;
 
-      if (!admin) return res.status(401).json({ message: "Authentication required" });
+      if (!admin) {
+        throw createError(ERROR_CODES.UNAUTHORIZED, "Authentication required", {
+          message: "Authentication required",
+        });
+      }
       if (!fromProvider || !toProvider || !amount) {
-        return res.status(400).json({ message: "fromProvider, toProvider, and amount are required" });
+        throw createError(
+          ERROR_CODES.INVALID_INPUT,
+          "fromProvider, toProvider, and amount are required",
+          {
+            message: "fromProvider, toProvider, and amount are required",
+          },
+        );
       }
       if (fromProvider === toProvider) {
-        return res.status(400).json({ message: "fromProvider and toProvider must be different" });
+        throw createError(
+          ERROR_CODES.INVALID_INPUT,
+          "fromProvider and toProvider must be different",
+          {
+            message: "fromProvider and toProvider must be different",
+          },
+        );
       }
       if (typeof amount !== "number" || amount <= 0) {
-        return res.status(400).json({ message: "amount must be a positive number" });
+        throw createError(
+          ERROR_CODES.INVALID_INPUT,
+          "amount must be a positive number",
+          {
+            message: "amount must be a positive number",
+          },
+        );
       }
 
-      const result = await triggerManualTransfer(fromProvider, toProvider, amount, admin.id, note);
+      const result = await triggerManualTransfer(
+        fromProvider,
+        toProvider,
+        amount,
+        admin.id,
+        note,
+      );
       res.status(201).json({ message: "Transfer initiated", ...result });
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Transfer failed";
       console.error("[liquidity] Manual transfer error:", err);
-      res.status(400).json({ message: msg });
+      throw createError(ERROR_CODES.INTERNAL_ERROR, msg);
     }
   },
 );
@@ -827,7 +1590,7 @@ router.post(
   async (req: Request, res: Response) => {
     try {
       if (!req.file) {
-        return res.status(400).json({
+        throw createError(ERROR_CODES.INVALID_INPUT, "No file uploaded", {
           error: "No file uploaded",
           message: "Please upload a CSV file with field name 'csv'",
         });
@@ -843,7 +1606,7 @@ router.post(
       const providerRows = await parseCSV(req.file.buffer);
 
       if (providerRows.length === 0) {
-        return res.status(400).json({
+        throw createError(ERROR_CODES.INVALID_INPUT, "Empty CSV", {
           error: "Empty CSV",
           message: "The uploaded CSV file contains no data rows",
         });
@@ -864,20 +1627,252 @@ router.post(
         message: "Reconciliation completed successfully",
         result,
       });
-    } catch (error) {
+    } catch (error: any) {
       console.error("[CSV RECONCILIATION ERROR]", error);
 
+      if (error.statusCode) {
+        throw error;
+      }
+
       if (error instanceof Error) {
-        return res.status(500).json({
+        throw createError(ERROR_CODES.INTERNAL_ERROR, "Reconciliation failed", {
           error: "Reconciliation failed",
           message: error.message,
         });
       }
 
-      res.status(500).json({
+      throw createError(ERROR_CODES.INTERNAL_ERROR, "Reconciliation failed", {
         error: "Reconciliation failed",
         message: "An unexpected error occurred during reconciliation",
       });
+    }
+  },
+);
+
+/**
+ * =========================
+ * PROVIDER RECONCILIATION
+ * =========================
+ */
+
+const providerReconciliationService = new ProviderReconciliationService();
+
+// GET /api/admin/reconciliation/runs - List reconciliation runs
+router.get(
+  "/reconciliation/runs",
+  requireAdmin,
+  logAdminAction("LIST_RECONCILIATION_RUNS"),
+  async (req: Request, res: Response) => {
+    try {
+      const page = Number(req.query.page) || 1;
+      const limit = Number(req.query.limit) || 20;
+      const provider = req.query.provider as string | undefined;
+
+      const offset = (page - 1) * limit;
+      const runs = await providerReconciliationService.getReconciliationHistory(
+        provider,
+        limit,
+      );
+
+      // Apply pagination
+      const paginatedRuns = runs.slice(offset, offset + limit);
+      const total = runs.length;
+
+      res.json({
+        data: paginatedRuns,
+        pagination: {
+          total,
+          page,
+          limit,
+          totalPages: Math.ceil(total / limit),
+        },
+      });
+    } catch (error) {
+      console.error("Error fetching reconciliation runs:", error);
+      throw createError(
+        ERROR_CODES.INTERNAL_ERROR,
+        "Failed to fetch reconciliation runs",
+      );
+    }
+  },
+);
+
+// GET /api/admin/reconciliation/alerts - List reconciliation alerts
+router.get(
+  "/reconciliation/alerts",
+  requireAdmin,
+  logAdminAction("LIST_RECONCILIATION_ALERTS"),
+  async (req: Request, res: Response) => {
+    try {
+      const page = Number(req.query.page) || 1;
+      const limit = Number(req.query.limit) || 50;
+      const status = req.query.status as string | undefined;
+      const severity = req.query.severity as string | undefined;
+
+      const alerts = await providerReconciliationService.getPendingAlerts(1000); // Get more to filter
+
+      // Apply filters
+      let filteredAlerts = alerts;
+      if (status) {
+        filteredAlerts = filteredAlerts.filter(
+          (alert) => alert.status === status,
+        );
+      }
+      if (severity) {
+        filteredAlerts = filteredAlerts.filter(
+          (alert) => alert.severity === severity,
+        );
+      }
+
+      // Apply pagination
+      const offset = (page - 1) * limit;
+      const paginatedAlerts = filteredAlerts.slice(offset, offset + limit);
+
+      res.json({
+        data: paginatedAlerts,
+        pagination: {
+          total: filteredAlerts.length,
+          page,
+          limit,
+          totalPages: Math.ceil(filteredAlerts.length / limit),
+        },
+      });
+    } catch (error) {
+      console.error("Error fetching reconciliation alerts:", error);
+      throw createError(
+        ERROR_CODES.INTERNAL_ERROR,
+        "Failed to fetch reconciliation alerts",
+      );
+    }
+  },
+);
+// PATCH /api/admin/reconciliation/alerts/:id - Review reconciliation alert
+router.patch(
+  "/reconciliation/alerts/:id",
+  requireAdmin,
+  logAdminAction("REVIEW_RECONCILIATION_ALERT"),
+  async (req: Request, res: Response) => {
+    try {
+      const { id } = req.params;
+      const { status, review_notes } = req.body;
+      const adminUser = (req as AuthRequest).user;
+
+      if (!adminUser) {
+        throw createError(ERROR_CODES.UNAUTHORIZED, "Authentication required", {
+          message: "Authentication required",
+        });
+      }
+
+      const allowedStatuses = ["reviewed", "dismissed", "resolved"];
+      if (!allowedStatuses.includes(status)) {
+        throw createError(
+          ERROR_CODES.INVALID_INPUT,
+          `Status must be one of: ${allowedStatuses.join(", ")}`,
+          {
+            message: `Status must be one of: ${allowedStatuses.join(", ")}`,
+          },
+        );
+      }
+
+      if (
+        !review_notes ||
+        typeof review_notes !== "string" ||
+        review_notes.trim().length === 0
+      ) {
+        throw createError(
+          ERROR_CODES.INVALID_INPUT,
+          "Review notes are required",
+          {
+            message: "Review notes are required",
+          },
+        );
+      }
+
+      await providerReconciliationService.reviewAlert(
+        id,
+        status,
+        review_notes.trim(),
+        adminUser.id,
+      );
+
+      res.json({ message: "Alert reviewed successfully" });
+    } catch (error) {
+      console.error("Error reviewing reconciliation alert:", error);
+      throw createError(ERROR_CODES.INTERNAL_ERROR, "Failed to review alert");
+    }
+  },
+);
+
+// POST /api/admin/reconciliation/manual - Run manual reconciliation
+router.post(
+  "/reconciliation/manual",
+  requireAdmin,
+  logAdminAction("RUN_MANUAL_RECONCILIATION"),
+  async (req: Request, res: Response) => {
+    try {
+      const { provider, report_date } = req.body;
+
+      if (!provider || !report_date) {
+        throw createError(
+          ERROR_CODES.INVALID_INPUT,
+          "Provider and report_date are required",
+          {
+            message: "Provider and report_date are required",
+          },
+        );
+      }
+
+      const reportDate = new Date(report_date);
+      if (isNaN(reportDate.getTime())) {
+        throw createError(
+          ERROR_CODES.INVALID_INPUT,
+          "Invalid report_date format. Use ISO date string.",
+          {
+            message: "Invalid report_date format. Use ISO date string.",
+          },
+        );
+      }
+
+      const { runManualProviderReconciliation } =
+        await import("../jobs/providerReconciliationJob.js");
+      const result = await runManualProviderReconciliation(
+        provider,
+        reportDate,
+      );
+
+      res.json({
+        message: "Manual reconciliation completed",
+        result,
+      });
+    } catch (error) {
+      console.error("Error running manual reconciliation:", error);
+      throw createError(
+        ERROR_CODES.INTERNAL_ERROR,
+        "Manual reconciliation failed",
+        {
+          message: "Manual reconciliation failed",
+          error: error instanceof Error ? error.message : "Unknown error",
+        },
+      );
+    }
+  },
+);
+
+// GET /api/admin/reconciliation/configs - List provider report configs
+router.get(
+  "/reconciliation/configs",
+  requireAdmin,
+  logAdminAction("LIST_RECONCILIATION_CONFIGS"),
+  async (req: Request, res: Response) => {
+    try {
+      const configs = await providerReconciliationService.getProviderConfigs();
+      res.json({ data: configs });
+    } catch (error) {
+      console.error("Error fetching reconciliation configs:", error);
+      throw createError(
+        ERROR_CODES.INTERNAL_ERROR,
+        "Failed to fetch reconciliation configs",
+      );
     }
   },
 );
@@ -960,11 +1955,15 @@ router.get(
       });
     } catch (err) {
       console.error("Health check error:", err);
-      res.status(500).json({
-        status: "error",
-        message: "Failed to retrieve health data",
-        timestamp: new Date().toISOString(),
-      });
+      throw createError(
+        ERROR_CODES.INTERNAL_ERROR,
+        "Failed to retrieve health data",
+        {
+          status: "error",
+          message: "Failed to retrieve health data",
+          timestamp: new Date().toISOString(),
+        },
+      );
     }
   },
 );
@@ -981,7 +1980,7 @@ router.get(
   requireAdmin,
   async (_req: Request, res: Response) => {
     try {
-      const { queryRead } = await import("../config/database");
+      const { queryRead } = await import("../config/database.js");
       const result = await queryRead<{
         report_date: string;
         user_fees: string;
@@ -1014,7 +2013,7 @@ router.get(
       res.json({ rows, totals });
     } catch (err) {
       console.error("[financial/pnl]", err);
-      res.status(500).json({ error: "Failed to fetch PnL data" });
+      throw createError(ERROR_CODES.INTERNAL_ERROR, "Failed to fetch PnL data");
     }
   },
 );
@@ -1198,6 +2197,999 @@ setInterval(load, 60000);
 </script>
 </body>
 </html>`);
+  },
+);
+
+type ValidationResult<T> =
+  | { ok: true; value: T }
+  | { ok: false; message: string };
+
+const complianceStatuses: ComplianceDocumentStatus[] = [
+  "draft",
+  "published",
+  "archived",
+];
+
+const normalizeString = (
+  value: unknown,
+  field: string,
+  required: boolean,
+): ValidationResult<string | null | undefined> => {
+  if (value === undefined) return { ok: true, value: undefined };
+  if (value === null)
+    return required
+      ? { ok: false, message: `${field} is required` }
+      : { ok: true, value: null };
+  if (typeof value !== "string")
+    return { ok: false, message: `${field} must be a string` };
+
+  const trimmed = value.trim();
+  if (required && trimmed.length === 0)
+    return { ok: false, message: `${field} is required` };
+
+  return { ok: true, value: trimmed.length === 0 ? null : trimmed };
+};
+
+const getCountryValue = (source: Record<string, unknown>) => {
+  if (Object.prototype.hasOwnProperty.call(source, "countryCode"))
+    return source.countryCode;
+  if (Object.prototype.hasOwnProperty.call(source, "country_code"))
+    return source.country_code;
+  return source.country;
+};
+
+const normalizeCountry = (
+  value: unknown,
+): ValidationResult<string | null | undefined> => {
+  if (value === undefined) return { ok: true, value: undefined };
+  if (value === null) return { ok: true, value: null };
+  if (typeof value !== "string")
+    return { ok: false, message: "country must be a string" };
+
+  const normalized = value.trim().toUpperCase();
+  if (normalized.length === 0) return { ok: true, value: null };
+  if (!/^[A-Z]{2}$/.test(normalized)) {
+    return { ok: false, message: "country must be a 2-letter code" };
+  }
+
+  return { ok: true, value: normalized };
+};
+
+const normalizeTags = (
+  value: unknown,
+): ValidationResult<string[] | undefined> => {
+  if (value === undefined) return { ok: true, value: undefined };
+
+  const rawTags = typeof value === "string" ? value.split(",") : value;
+  if (!Array.isArray(rawTags))
+    return {
+      ok: false,
+      message: "tags must be an array or comma-separated string",
+    };
+
+  const tags: string[] = [];
+  for (const tag of rawTags) {
+    if (typeof tag !== "string")
+      return { ok: false, message: "tags must contain only strings" };
+    const normalized = tag.trim().toLowerCase();
+    if (normalized.length > 0 && !tags.includes(normalized))
+      tags.push(normalized);
+  }
+
+  return { ok: true, value: tags };
+};
+
+const normalizeStatus = (
+  value: unknown,
+): ValidationResult<ComplianceDocumentStatus | undefined> => {
+  if (value === undefined) return { ok: true, value: undefined };
+  if (
+    typeof value !== "string" ||
+    !complianceStatuses.includes(value as ComplianceDocumentStatus)
+  ) {
+    return {
+      ok: false,
+      message: "status must be draft, published, or archived",
+    };
+  }
+
+  return { ok: true, value: value as ComplianceDocumentStatus };
+};
+
+const validateComplianceCreate = (
+  body: Record<string, unknown>,
+): ValidationResult<ComplianceDocumentCreateInput> => {
+  const title = normalizeString(body.title, "title", true);
+  if (!title.ok) return title as ValidationResult<ComplianceDocumentCreateInput>;
+
+  const docBody = normalizeString(body.body, "body", true);
+  if (!docBody.ok) return docBody as ValidationResult<ComplianceDocumentCreateInput>;
+
+  const summary = normalizeString(body.summary, "summary", false);
+  if (!summary.ok) return summary as ValidationResult<ComplianceDocumentCreateInput>;
+
+  const provider = normalizeString(body.provider, "provider", false);
+  if (!provider.ok) return provider as ValidationResult<ComplianceDocumentCreateInput>;
+  if (provider.value && provider.value.length > 100) {
+    return { ok: false, message: "provider must be 100 characters or fewer" };
+  }
+
+  const sourceUrl = normalizeString(
+    body.sourceUrl ?? body.source_url,
+    "sourceUrl",
+    false,
+  );
+  if (!sourceUrl.ok) return sourceUrl as ValidationResult<ComplianceDocumentCreateInput>;
+
+  const country = normalizeCountry(getCountryValue(body));
+  if (!country.ok) return country as ValidationResult<ComplianceDocumentCreateInput>;
+
+  const tags = normalizeTags(body.tags);
+  if (!tags.ok) return tags as ValidationResult<ComplianceDocumentCreateInput>;
+
+  const status = normalizeStatus(body.status);
+  if (!status.ok) return status as ValidationResult<ComplianceDocumentCreateInput>;
+
+  return {
+    ok: true,
+    value: {
+      title: title.value as string,
+      body: docBody.value as string,
+      summary: summary.value ?? null,
+      provider: provider.value ?? null,
+      sourceUrl: sourceUrl.value ?? null,
+      countryCode: country.value ?? null,
+      tags: tags.value ?? [],
+      status: status.value,
+    },
+  };
+};
+
+const validateComplianceUpdate = (
+  body: Record<string, unknown>,
+): ValidationResult<ComplianceDocumentUpdateInput> => {
+  const allowedFields = new Set([
+    "title",
+    "summary",
+    "body",
+    "country",
+    "countryCode",
+    "country_code",
+    "provider",
+    "tags",
+    "sourceUrl",
+    "source_url",
+    "status",
+  ]);
+  const invalidField = Object.keys(body).find((key) => !allowedFields.has(key));
+  if (invalidField)
+    return { ok: false, message: `Invalid field: ${invalidField}` };
+
+  const input: ComplianceDocumentUpdateInput = {};
+
+  if (Object.prototype.hasOwnProperty.call(body, "title")) {
+    const title = normalizeString(body.title, "title", true);
+    if (!title.ok) return title as ValidationResult<ComplianceDocumentUpdateInput>;
+    input.title = title.value as string;
+  }
+
+  if (Object.prototype.hasOwnProperty.call(body, "body")) {
+    const docBody = normalizeString(body.body, "body", true);
+    if (!docBody.ok) return docBody as ValidationResult<ComplianceDocumentUpdateInput>;
+    input.body = docBody.value as string;
+  }
+
+  if (Object.prototype.hasOwnProperty.call(body, "summary")) {
+    const summary = normalizeString(body.summary, "summary", false);
+    if (!summary.ok) return summary as ValidationResult<ComplianceDocumentUpdateInput>;
+    input.summary = summary.value ?? null;
+  }
+
+  if (Object.prototype.hasOwnProperty.call(body, "provider")) {
+    const provider = normalizeString(body.provider, "provider", false);
+    if (!provider.ok) return provider as ValidationResult<ComplianceDocumentUpdateInput>;
+    if (provider.value && provider.value.length > 100) {
+      return { ok: false, message: "provider must be 100 characters or fewer" };
+    }
+    input.provider = provider.value ?? null;
+  }
+
+  if (
+    Object.prototype.hasOwnProperty.call(body, "sourceUrl") ||
+    Object.prototype.hasOwnProperty.call(body, "source_url")
+  ) {
+    const sourceUrl = normalizeString(
+      body.sourceUrl ?? body.source_url,
+      "sourceUrl",
+      false,
+    );
+    if (!sourceUrl.ok) return sourceUrl as ValidationResult<ComplianceDocumentUpdateInput>;
+    input.sourceUrl = sourceUrl.value ?? null;
+  }
+
+  if (
+    Object.prototype.hasOwnProperty.call(body, "country") ||
+    Object.prototype.hasOwnProperty.call(body, "countryCode") ||
+    Object.prototype.hasOwnProperty.call(body, "country_code")
+  ) {
+    const country = normalizeCountry(getCountryValue(body));
+    if (!country.ok) return country as ValidationResult<ComplianceDocumentUpdateInput>;
+    input.countryCode = country.value ?? null;
+  }
+
+  if (Object.prototype.hasOwnProperty.call(body, "tags")) {
+    const tags = normalizeTags(body.tags);
+    if (!tags.ok) return tags as ValidationResult<ComplianceDocumentUpdateInput>;
+    input.tags = tags.value ?? [];
+  }
+
+  if (Object.prototype.hasOwnProperty.call(body, "status")) {
+    const status = normalizeStatus(body.status);
+    if (!status.ok) return status as ValidationResult<ComplianceDocumentUpdateInput>;
+    input.status = status.value;
+  }
+
+  if (Object.keys(input).length === 0)
+    return { ok: false, message: "At least one field is required" };
+
+  return { ok: true, value: input };
+};
+
+const getQueryString = (value: unknown) => {
+  if (Array.isArray(value)) return value[0];
+  return typeof value === "string" ? value.trim() : undefined;
+};
+
+const parsePositiveInt = (value: unknown, fallback: number, max?: number) => {
+  const raw = getQueryString(value);
+  const parsed = raw ? parseInt(raw, 10) : fallback;
+  if (!Number.isFinite(parsed) || parsed < 1) return fallback;
+  return max ? Math.min(parsed, max) : parsed;
+};
+
+router.get(
+  "/compliance/knowledge-base",
+  requireAdmin,
+  (_req: Request, res: Response) => {
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    res.send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Compliance Knowledge Base</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}body{font-family:system-ui,sans-serif;background:#0f172a;color:#e2e8f0;padding:24px}h1{font-size:1.4rem;font-weight:600;margin-bottom:8px;color:#f8fafc}.sub{color:#94a3b8;margin-bottom:20px}.grid{display:grid;grid-template-columns:340px 1fr;gap:18px}.panel{background:#1e293b;border-radius:10px;padding:18px}.row{display:flex;gap:8px;margin-bottom:10px}input,select,textarea{width:100%;background:#0f172a;border:1px solid #334155;color:#f8fafc;padding:9px 11px;border-radius:6px}textarea{min-height:120px;resize:vertical}button{background:#3b82f6;color:white;border:none;padding:9px 13px;border-radius:6px;cursor:pointer;font-weight:600}button.secondary{background:#475569}button.danger{background:#dc2626}.doc{border-bottom:1px solid #334155;padding:13px 0;cursor:pointer}.doc:hover h3{color:#93c5fd}.doc h3{font-size:1rem;margin-bottom:5px}.meta,.empty{font-size:.8rem;color:#94a3b8}.pill{display:inline-block;background:#334155;color:#cbd5e1;border-radius:999px;padding:2px 8px;margin:4px 4px 0 0;font-size:.72rem}.status{float:right;text-transform:uppercase;color:#60a5fa}.actions{display:flex;gap:8px;margin-top:12px}.message{margin-top:10px;color:#94a3b8;font-size:.85rem}.error{color:#f87171}.success{color:#34d399}@media(max-width:900px){.grid{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<h1>Compliance Knowledge Base</h1>
+<div class="sub">Local-law and regulation document portal for admin teams.</div>
+<div class="grid">
+  <div class="panel">
+    <div class="row"><input id="search" placeholder="Search title, body, provider, tags"><button onclick="loadDocs()">Search</button></div>
+    <div class="row"><select id="country"><option value="">All countries</option></select><select id="provider"><option value="">All providers</option></select></div>
+    <div class="row"><select id="tag"><option value="">All tags</option></select><select id="status"><option value="">Active docs</option><option>draft</option><option>published</option><option>archived</option></select></div>
+    <div id="docs"></div>
+  </div>
+  <div class="panel">
+    <input id="docId" type="hidden">
+    <div class="row"><input id="title" placeholder="Title"><select id="docStatus"><option>published</option><option>draft</option><option>archived</option></select></div>
+    <div class="row"><input id="docCountry" placeholder="Country code"><input id="docProvider" placeholder="Provider"></div>
+    <input id="docTags" placeholder="Tags, comma separated" style="margin-bottom:10px">
+    <input id="sourceUrl" placeholder="Source URL" style="margin-bottom:10px">
+    <textarea id="summary" placeholder="Summary" style="margin-bottom:10px"></textarea>
+    <textarea id="body" placeholder="Document body"></textarea>
+    <div class="actions"><button onclick="saveDoc()">Save</button><button class="secondary" onclick="resetForm()">New</button><button class="danger" onclick="archiveDoc()">Archive</button></div>
+    <div id="message" class="message"></div>
+  </div>
+</div>
+<script>
+const api = '/api/admin/compliance/docs';
+const el = id => document.getElementById(id);
+function esc(v){return String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
+function params(){const p = new URLSearchParams();['search','country','provider','tag','status'].forEach(id => {const v = el(id).value.trim(); if(v) p.set(id, v);}); return p;}
+function setMessage(text, cls){el('message').className = 'message ' + (cls || ''); el('message').textContent = text;}
+async function loadFacets(){const r = await fetch(api + '/facets', {credentials:'include'}); if(!r.ok) return; const f = await r.json(); fill('country', f.countries); fill('provider', f.providers); fill('tag', f.tags);}
+function fill(id, values){const first = el(id).options[0].outerHTML; el(id).innerHTML = first + (values || []).map(v => '<option value="' + esc(v) + '">' + esc(v) + '</option>').join('');}
+async function loadDocs(){const r = await fetch(api + '?' + params().toString(), {credentials:'include'}); const box = el('docs'); if(!r.ok){box.innerHTML='<div class="empty error">Failed to load documents</div>'; return;} const json = await r.json(); if(!json.data.length){box.innerHTML='<div class="empty">No documents found</div>'; return;} box.innerHTML = json.data.map(d => '<div class="doc" onclick="openDoc(\'' + d.id + '\')"><span class="status">' + esc(d.status) + '</span><h3>' + esc(d.title) + '</h3><div class="meta">' + esc(d.countryCode || 'Global') + ' · ' + esc(d.provider || 'Any provider') + '</div><div>' + (d.tags || []).map(t => '<span class="pill">' + esc(t) + '</span>').join('') + '</div></div>').join('');}
+async function openDoc(id){const r = await fetch(api + '/' + encodeURIComponent(id), {credentials:'include'}); if(!r.ok){setMessage('Document not found','error'); return;} const d = await r.json(); el('docId').value=d.id; el('title').value=d.title || ''; el('docStatus').value=d.status || 'published'; el('docCountry').value=d.countryCode || ''; el('docProvider').value=d.provider || ''; el('docTags').value=(d.tags || []).join(', '); el('sourceUrl').value=d.sourceUrl || ''; el('summary').value=d.summary || ''; el('body').value=d.body || ''; setMessage('Loaded document','');}
+async function saveDoc(){const id = el('docId').value; const payload = {title:el('title').value, status:el('docStatus').value, country:el('docCountry').value, provider:el('docProvider').value, tags:el('docTags').value, sourceUrl:el('sourceUrl').value, summary:el('summary').value, body:el('body').value}; const r = await fetch(id ? api + '/' + encodeURIComponent(id) : api, {method:id?'PATCH':'POST', headers:{'Content-Type':'application/json'}, credentials:'include', body:JSON.stringify(payload)}); const json = await r.json().catch(()=>({})); if(!r.ok){setMessage(json.message || 'Save failed','error'); return;} setMessage('Saved','success'); el('docId').value=json.id; await loadFacets(); await loadDocs();}
+async function archiveDoc(){const id = el('docId').value; if(!id) return setMessage('Select a document first','error'); const r = await fetch(api + '/' + encodeURIComponent(id), {method:'DELETE', credentials:'include'}); if(!r.ok){setMessage('Archive failed','error'); return;} setMessage('Archived','success'); resetForm(); await loadFacets(); await loadDocs();}
+function resetForm(){['docId','title','docCountry','docProvider','docTags','sourceUrl','summary','body'].forEach(id=>el(id).value=''); el('docStatus').value='published';}
+['country','provider','tag','status'].forEach(id => el(id).onchange = loadDocs); el('search').onkeydown = e => { if(e.key === 'Enter') loadDocs(); };
+loadFacets(); loadDocs();
+</script>
+</body>
+</html>`);
+  },
+);
+
+router.get(
+  "/compliance/docs",
+  requireAdmin,
+  async (req: Request, res: Response) => {
+    try {
+      const page = parsePositiveInt(req.query.page, 1);
+      const limit = parsePositiveInt(req.query.limit, 25, 100);
+      const country = normalizeCountry(getQueryString(req.query.country));
+      if (!country.ok) {
+        const err = country as { ok: false; message: string };
+        throw createError(ERROR_CODES.INVALID_INPUT, err.message, {
+          message: err.message,
+        });
+      }
+
+      const status = normalizeStatus(getQueryString(req.query.status));
+      if (!status.ok) {
+        const err = status as { ok: false; message: string };
+        throw createError(ERROR_CODES.INVALID_INPUT, err.message, {
+          message: err.message,
+        });
+      }
+
+      const result = await complianceDocumentModel.list({
+        country: country.value || undefined,
+        provider: getQueryString(req.query.provider) || undefined,
+        tag: getQueryString(req.query.tag)?.toLowerCase() || undefined,
+        status: status.value,
+        search: getQueryString(req.query.search) || undefined,
+        limit,
+        offset: (page - 1) * limit,
+      });
+
+      res.json({
+        data: result.documents,
+        pagination: {
+          total: result.total,
+          page,
+          limit,
+          totalPages: Math.ceil(result.total / limit),
+        },
+      });
+    } catch (error) {
+      console.error("[compliance/docs:list]", error);
+      if ((error as any).statusCode) {
+        throw error;
+      }
+      throw createError(
+        ERROR_CODES.INTERNAL_ERROR,
+        "Failed to list compliance documents",
+      );
+    }
+  },
+);
+
+router.get(
+  "/compliance/docs/facets",
+  requireAdmin,
+  async (_req: Request, res: Response) => {
+    try {
+      res.json(await complianceDocumentModel.getFacets());
+    } catch (error) {
+      console.error("[compliance/docs:facets]", error);
+      throw createError(
+        ERROR_CODES.INTERNAL_ERROR,
+        "Failed to fetch compliance document facets",
+        {
+          message: "Failed to fetch compliance document facets",
+        },
+      );
+    }
+  },
+);
+
+router.get(
+  "/compliance/docs/:id",
+  requireAdmin,
+  async (req: Request, res: Response) => {
+    try {
+      const document = await complianceDocumentModel.findById(req.params.id);
+      if (!document) {
+        throw createError(
+          ERROR_CODES.NOT_FOUND,
+          "Compliance document not found",
+          {
+            message: "Compliance document not found",
+          },
+        );
+      }
+      res.json(document);
+    } catch (error) {
+      console.error("[compliance/docs:get]", error);
+      if ((error as any).statusCode) {
+        throw error;
+      }
+      throw createError(
+        ERROR_CODES.INTERNAL_ERROR,
+        "Failed to fetch compliance document",
+      );
+    }
+  },
+);
+
+router.post(
+  "/compliance/docs",
+  requireAdmin,
+  logAdminAction("CREATE_COMPLIANCE_DOCUMENT"),
+  async (req: Request, res: Response) => {
+    try {
+      const validation = validateComplianceCreate(req.body ?? {});
+      if (!validation.ok) {
+        const err = validation as { ok: false; message: string };
+        throw createError(ERROR_CODES.INVALID_INPUT, err.message, {
+          message: err.message,
+        });
+      }
+
+      const adminUser = (req as AuthRequest).user;
+      const document = await complianceDocumentModel.create(
+        validation.value,
+        adminUser?.id,
+      );
+      res.status(201).json(document);
+    } catch (error) {
+      console.error("[compliance/docs:create]", error);
+      if ((error as any).statusCode) {
+        throw error;
+      }
+      throw createError(
+        ERROR_CODES.INTERNAL_ERROR,
+        "Failed to create compliance document",
+      );
+    }
+  },
+);
+
+router.patch(
+  "/compliance/docs/:id",
+  requireAdmin,
+  logAdminAction("UPDATE_COMPLIANCE_DOCUMENT"),
+  async (req: Request, res: Response) => {
+    try {
+      const validation = validateComplianceUpdate(req.body ?? {});
+      if (!validation.ok) {
+        const err = validation as { ok: false; message: string };
+        throw createError(ERROR_CODES.INVALID_INPUT, err.message, {
+          message: err.message,
+        });
+      }
+
+      const adminUser = (req as AuthRequest).user;
+      const document = await complianceDocumentModel.update(
+        req.params.id,
+        validation.value,
+        adminUser?.id,
+      );
+      if (!document) {
+        throw createError(
+          ERROR_CODES.NOT_FOUND,
+          "Compliance document not found",
+          {
+            message: "Compliance document not found",
+          },
+        );
+      }
+      res.json(document);
+    } catch (error) {
+      console.error("[compliance/docs:update]", error);
+      if ((error as any).statusCode) {
+        throw error;
+      }
+      throw createError(
+        ERROR_CODES.INTERNAL_ERROR,
+        "Failed to update compliance document",
+      );
+    }
+  },
+);
+
+/**
+ * =========================
+ * STELLAR OPERATIONS
+ * =========================
+ */
+
+// POST /api/admin/stellar/enable-clawback
+router.post(
+  "/stellar/enable-clawback",
+  requireAdmin,
+  requireSuperAdmin,
+  logAdminAction("ENABLE_STELLAR_CLAWBACK"),
+  async (_req: Request, res: Response) => {
+    try {
+      const stellarService = new StellarService();
+      await stellarService.enableClawback();
+      res.json({ message: "Clawback capability enabled on issuance account" });
+    } catch (err) {
+      console.error("Error enabling clawback:", err);
+      throw createError(
+        ERROR_CODES.INTERNAL_ERROR,
+        "Failed to enable clawback capability",
+        {
+          message: "Failed to enable clawback capability",
+          error: err instanceof Error ? err.message : "Unknown error",
+        },
+      );
+    }
+  },
+);
+
+// POST /api/admin/stellar/clawback
+router.post(
+  "/stellar/clawback",
+  requireAdmin,
+  logAdminAction("EXECUTE_STELLAR_CLAWBACK"),
+  async (req: Request, res: Response) => {
+    try {
+      const { transactionId, reason } = req.body;
+
+      if (!transactionId) {
+        throw createError(
+          ERROR_CODES.INVALID_INPUT,
+          "transactionId is required",
+          {
+            message: "transactionId is required",
+          },
+        );
+      }
+      if (!reason) {
+        throw createError(
+          ERROR_CODES.INVALID_INPUT,
+          "reason is required for clawback",
+          {
+            message: "reason is required for clawback",
+          },
+        );
+      }
+
+      const transaction = await transactionModel.findById(transactionId);
+      if (!transaction) {
+        throw createError(ERROR_CODES.NOT_FOUND, "Transaction not found", {
+          message: "Transaction not found",
+        });
+      }
+
+      if (transaction.status !== TransactionStatus.Completed) {
+        throw createError(
+          ERROR_CODES.INVALID_INPUT,
+          `Cannot claw back transaction in status: ${transaction.status}`,
+          {
+            message: `Cannot claw back transaction in status: ${transaction.status}`,
+          },
+        );
+      }
+
+      const stellarService = new StellarService();
+      const { hash } = await stellarService.executeClawback(
+        transaction.stellarAddress,
+        transaction.amount,
+      );
+
+      // Handle accounting reversal
+      await ledgerService.postClawback(
+        parseFloat(transaction.amount),
+        transaction.referenceNumber,
+        transaction.id,
+        (req as AuthRequest).user?.id || "admin",
+        reason,
+      );
+
+      // Update transaction status
+      await transactionModel.updateStatus(
+        transactionId,
+        TransactionStatus.ClawedBack,
+      );
+
+      res.json({
+        message: "Transaction clawed back successfully",
+        stellarHash: hash,
+        transactionId,
+      });
+    } catch (err) {
+      console.error("Error executing clawback:", err);
+      throw createError(
+        ERROR_CODES.INTERNAL_ERROR,
+        "Failed to execute clawback",
+        {
+          message: "Failed to execute clawback",
+          error: err instanceof Error ? err.message : "Unknown error",
+        },
+      );
+    }
+  },
+);
+
+// POST /api/admin/stellar/batch-payment
+router.post(
+  "/stellar/batch-payment",
+  requireAdmin,
+  logAdminAction("EXECUTE_STELLAR_BATCH_PAYMENT"),
+  async (req: Request, res: Response) => {
+    try {
+      const { payments } = req.body; // Array of { destination, amount, memo }
+
+      if (!Array.isArray(payments) || payments.length === 0) {
+        throw createError(
+          ERROR_CODES.INVALID_INPUT,
+          "payments array is required and cannot be empty",
+          {
+            message: "payments array is required and cannot be empty",
+          },
+        );
+      }
+
+      if (payments.length > 50) {
+        throw createError(
+          ERROR_CODES.INVALID_INPUT,
+          "Maximum 50 payments per batch allowed",
+          {
+            message: "Maximum 50 payments per batch allowed",
+          },
+        );
+      }
+
+      // Initialize HighThroughputService if needed
+      if (!highThroughputService.isServiceInitialized()) {
+        await highThroughputService.initialize();
+      }
+
+      const stellarIssuerSecret = process.env.STELLAR_ISSUER_SECRET;
+      if (!stellarIssuerSecret) {
+        throw new Error("STELLAR_ISSUER_SECRET not configured");
+      }
+
+      const issuerPublicKey =
+        StellarSdk.Keypair.fromSecret(stellarIssuerSecret).publicKey();
+
+      // 1. Create transactions in DB
+      const transactionIds: string[] = [];
+      for (const p of payments) {
+        const tx = await transactionModel.create({
+          type: "payment",
+          amount: p.amount,
+          stellarAddress: p.destination,
+          provider: "stellar",
+          status: TransactionStatus.Pending,
+          metadata: { memo: p.memo, batch: true },
+        });
+        transactionIds.push(tx.id);
+      }
+
+      // 2. Prepare payments for HighThroughputService
+      const paymentOptions = payments.map((p, index) => ({
+        sourceAccount: issuerPublicKey,
+        sourceSecret: stellarIssuerSecret,
+        destination: p.destination,
+        amount: p.amount,
+        asset: "native" as const, // Or configured asset
+        memo: p.memo,
+        useFeeBump: true, // Key feature requirement
+      }));
+
+      // 3. Submit batch
+      const batchResult =
+        await highThroughputService.submitBatchPayments(paymentOptions);
+
+      // 4. Update DB status based on results
+      for (let i = 0; i < batchResult.results.length; i++) {
+        const result = batchResult.results[i];
+        const txId = transactionIds[i];
+
+        if (result.success) {
+          await transactionModel.updateStatus(
+            txId,
+            TransactionStatus.Completed,
+          );
+          await transactionModel.updateMetadata(txId, {
+            ...payments[i].metadata,
+            stellar: { transactionHash: result.hash },
+          });
+        } else {
+          await transactionModel.updateStatus(txId, TransactionStatus.Failed);
+          await transactionModel.updateMetadata(txId, {
+            ...payments[i].metadata,
+            error: result.error,
+          });
+        }
+      }
+
+      res.json({
+        message: "Batch payment processed",
+        successful: batchResult.successful,
+        failed: batchResult.failed,
+        results: batchResult.results,
+        totalTimeMs: batchResult.totalTimeMs,
+      });
+    } catch (err) {
+      console.error("Error executing batch payment:", err);
+      throw createError(
+        ERROR_CODES.INTERNAL_ERROR,
+        "Failed to execute batch payment",
+        {
+          message: "Failed to execute batch payment",
+          error: err instanceof Error ? err.message : "Unknown error",
+        },
+      );
+    }
+  },
+);
+
+router.delete(
+  "/compliance/docs/:id",
+  requireAdmin,
+  logAdminAction("ARCHIVE_COMPLIANCE_DOCUMENT"),
+  async (req: Request, res: Response) => {
+    try {
+      const adminUser = (req as AuthRequest).user;
+      const document = await complianceDocumentModel.archive(
+        req.params.id,
+        adminUser?.id,
+      );
+      if (!document) {
+        throw createError(
+          ERROR_CODES.NOT_FOUND,
+          "Compliance document not found",
+          {
+            message: "Compliance document not found",
+          },
+        );
+      }
+      res.json(document);
+    } catch (error) {
+      console.error("[compliance/docs:archive]", error);
+      if ((error as any).statusCode) {
+        throw error;
+      }
+      throw createError(
+        ERROR_CODES.INTERNAL_ERROR,
+        "Failed to archive compliance document",
+      );
+    }
+  },
+);
+
+// =========================
+// PROVIDER SETTINGS
+// =========================
+
+router.get(
+  "/provider-settings",
+  requireAdmin,
+  logAdminAction("GET_PROVIDER_SETTINGS"),
+  async (req: Request, res: Response) => {
+    try {
+      const settings = await providerSettingsService.getAllSettings();
+      res.json(settings);
+    } catch (error) {
+      console.error("Error fetching provider settings:", error);
+      res.status(500).json({ message: "Failed to fetch provider settings" });
+    }
+  }
+);
+
+router.put(
+  "/provider-settings/:providerName",
+  requireAdmin,
+  logAdminAction("UPDATE_PROVIDER_SETTINGS"),
+  async (req: Request, res: Response) => {
+    try {
+      const providerName = req.params.providerName;
+      const { failure_threshold, timeout_ms, fallback_order } = req.body;
+      
+      const settings = await providerSettingsService.upsertProviderSettings(
+        providerName,
+        failure_threshold || 3,
+        timeout_ms || 5000,
+        fallback_order || null
+      );
+      
+      resetCircuitBreakerForProvider(providerName);
+      
+      res.json({ message: "Provider settings updated successfully", settings });
+    } catch (error) {
+      console.error("Error updating provider settings:", error);
+      res.status(500).json({ message: "Failed to update provider settings" });
+    }
+  }
+);
+
+/**
+ * =========================
+ * DASHBOARD & MONITORING
+ * =========================
+ */
+
+/**
+ * GET /api/admin/dashboard/stats
+ * Comprehensive dashboard statistics for CLI/UI
+ */
+router.get(
+  "/dashboard/stats",
+  requireAdmin,
+  logAdminAction("GET_DASHBOARD_STATS"),
+  async (req: Request, res: Response) => {
+    try {
+      const startTime = Date.now();
+      const timestamp = new Date().toISOString();
+
+      // Fetch system health in parallel
+      const [
+        queueStats,
+        databaseHealth,
+        redisHealth,
+        transactionStats,
+        providerHealth,
+      ] = await Promise.all([
+        getQueueStats().catch((err) => {
+          console.error("[Dashboard] Queue stats error:", err);
+          return {
+            pending: 0,
+            active: 0,
+            completed: 0,
+            failed: 0,
+            total: 0,
+          };
+        }),
+        checkReplicaHealth()
+          .then((replicas) => ({
+            status: "healthy" as const,
+            replicas,
+          }))
+          .catch((err) => {
+            console.error("[Dashboard] Database health error:", err);
+            return { status: "unhealthy" as const, replicas: [] };
+          }),
+        redisClient
+          .ping()
+          .then(() => ({ status: "healthy" as const, responseTime: 0 }))
+          .catch((err) => {
+            console.error("[Dashboard] Redis health error:", err);
+            return { status: "unhealthy" as const, responseTime: undefined };
+          }),
+        (async () => {
+          const stats = await (transactionModel as any).getStatistics(
+            new Date(Date.now() - 24 * 60 * 60 * 1000),
+            new Date(),
+          );
+          return {
+            totalCount: stats.totalTransactions,
+            successRate: stats.successRate,
+            totalVolume: stats.totalVolume,
+            activeUsers: await (UserModel as any).countActiveUsers(24),
+          };
+        })().catch((err) => {
+          console.error("[Dashboard] Transaction stats error:", err);
+          return {
+            totalCount: 0,
+            successRate: 0,
+            totalVolume: 0,
+            activeUsers: 0,
+          };
+        }),
+        (async () => {
+          const mobileMoneyService = new MobileMoneyService();
+          try {
+            return mobileMoneyService.getFailoverStats();
+          } catch (err) {
+            console.error("[Dashboard] Provider health error:", err);
+            return {};
+          }
+        })(),
+      ]);
+
+      const responseTime = Date.now() - startTime;
+      const stellarHealthy = transactionStats.totalCount >= 0; // If we can query, Stellar is ok
+
+      res.json({
+        timestamp,
+        health: {
+          database:
+            databaseHealth.status === "healthy" ? "healthy" : "unhealthy",
+          redis: redisHealth.status === "healthy" ? "healthy" : "unhealthy",
+          stellar: stellarHealthy ? "healthy" : "unhealthy",
+          responseTime,
+        },
+        queue: {
+          totalJobs: (queueStats as any).total || 0,
+          pendingJobs: (queueStats as any).pending || 0,
+          activeJobs: (queueStats as any).active || 0,
+          completedJobs: (queueStats as any).completed || 0,
+          failedJobs: (queueStats as any).failed || 0,
+          dlqSize: (queueStats as any).dlq || 0,
+        },
+        transactions: {
+          totalCount: transactionStats.totalCount,
+          successRate: transactionStats.successRate,
+          totalVolume: transactionStats.totalVolume,
+          activeUsers: transactionStats.activeUsers,
+        },
+        providers: Object.entries(providerHealth).reduce(
+          (acc, [provider, stats]: [string, any]) => {
+            acc[provider] = {
+              status: stats.isHealthy ? "online" : "offline",
+              failureRate: stats.failureRate || 0,
+              lastChecked: timestamp,
+            };
+            return acc;
+          },
+          {} as Record<string, any>,
+        ),
+      });
+    } catch (error) {
+      console.error("[Dashboard] Failed to fetch stats:", error);
+      throw createError(ERROR_CODES.INTERNAL_ERROR, "Failed to fetch dashboard stats");
+    }
+  },
+);
+
+/**
+ * GET /api/admin/health
+ * Quick health check for monitoring
+ */
+router.get(
+  "/health",
+  logAdminAction("GET_HEALTH"),
+  async (req: Request, res: Response) => {
+    try {
+      const startTime = Date.now();
+
+      const [databaseOk, redisOk] = await Promise.all([
+        pool
+          .query("SELECT 1")
+          .then(() => true)
+          .catch(() => false),
+        redisClient
+          .ping()
+          .then(() => true)
+          .catch(() => false),
+      ]);
+
+      const responseTime = Date.now() - startTime;
+
+      res.json({
+        database: databaseOk ? "healthy" : "unhealthy",
+        redis: redisOk ? "healthy" : "unhealthy",
+        stellar: "healthy", // Assume ok unless we detect specific Stellar failures
+        responseTime,
+      });
+    } catch (error) {
+      console.error("[Health] Check failed:", error);
+      res.status(503).json({
+        database: "unhealthy",
+        redis: "unhealthy",
+        stellar: "unhealthy",
+        responseTime: 0,
+      });
+    }
+  },
+);
+
+/**
+ * GET /api/admin/queue/stats
+ * Queue metrics with detailed breakdown
+ */
+router.get(
+  "/queue/stats",
+  requireAdmin,
+  logAdminAction("GET_QUEUE_STATS"),
+  async (req: Request, res: Response) => {
+    try {
+      const stats = await getQueueStats();
+
+      res.json({
+        totalJobs: (stats as any).total || 0,
+        pendingJobs: (stats as any).pending || 0,
+        activeJobs: (stats as any).active || 0,
+        completedJobs: (stats as any).completed || 0,
+        failedJobs: (stats as any).failed || 0,
+        dlqSize: (stats as any).dlq || 0,
+        timestamp: new Date().toISOString(),
+      });
+    } catch (error) {
+      console.error("[Queue] Stats fetch failed:", error);
+      throw createError(ERROR_CODES.INTERNAL_ERROR, "Failed to fetch queue stats");
+    }
   },
 );
 

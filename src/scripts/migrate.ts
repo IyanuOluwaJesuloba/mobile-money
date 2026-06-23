@@ -29,8 +29,11 @@ dotenv.config();
 // Database connection
 // ---------------------------------------------------------------------------
 
+const isSandbox = process.env.IS_SANDBOX === "true";
+const dbUrl = isSandbox ? (process.env.SANDBOX_DATABASE_URL || process.env.DATABASE_URL) : process.env.DATABASE_URL;
+
 const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
+  connectionString: dbUrl,
   max: 5,
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 5000,

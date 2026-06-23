@@ -1,6 +1,7 @@
 import axios, { AxiosInstance } from 'axios';
 import { Pool } from 'pg';
 import { z } from 'zod';
+import { AccountingService } from './accounting';
 
 // KYC Provider: Entrust Identity Verification (formerly Onfido)
 // Documentation: https://documentation.identity.entrust.com/api/latest/
@@ -338,6 +339,15 @@ export class KYCService {
       await this.db.query(query, [kycLevel, userId]);
       
       console.log(`Updated KYC level for user ${userId} to ${kycLevel}`);
+      // If user reached a verified level, attempt to sync contact to accounting providers (Xero)
+      try {
+        if (kycLevel !== KYCLevel.NONE) {
+          const accountingSvc = new AccountingService();
+          await accountingSvc.syncContactForUser(userId);
+        }
+      } catch (err) {
+        console.error(`Failed to sync accounting contact after KYC update for user ${userId}: ${err instanceof Error ? err.message : String(err)}`);
+      }
     } catch (error) {
       console.error(`Failed to update user KYC level: ${error instanceof Error ? error.message : 'Unknown error'}`);
       throw error;

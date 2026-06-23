@@ -1,0 +1,34 @@
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: mobile-money-worker-scaler
+  namespace: default
+spec:
+  scaleTargetRef:
+    name: mobile-money-worker
+  minReplicaCount: 1
+  maxReplicaCount: 10
+  cooldownPeriod: 300
+  pollingInterval: 30
+  triggers:
+    # Scale based on queue depth (waiting + active jobs)
+    - type: prometheus
+      metadata:
+        serverAddress: http://prometheus-server.monitoring.svc.cluster.local # Adjust to your Prometheus address
+        metricName: queue_depth_total
+        query: queue_depth_total
+        threshold: "50" # Scale up if total depth > 50
+    # Scale based on latency (average age of jobs)
+    - type: prometheus
+      metadata:
+        serverAddress: http://prometheus-server.monitoring.svc.cluster.local
+        metricName: queue_latency_ms
+        query: max(queue_latency_ms)
+        threshold: "5000" # Scale up if latency > 5 seconds
+    # Scale based on Redis memory usage (safety measure)
+    - type: prometheus
+      metadata:
+        serverAddress: http://prometheus-server.monitoring.svc.cluster.local
+        metricName: redis_memory_usage_bytes
+        query: redis_memory_usage_bytes
+        threshold: "400000000" # 400MB threshold

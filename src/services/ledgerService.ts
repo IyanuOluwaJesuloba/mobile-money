@@ -12,6 +12,7 @@ export interface LedgerEntry {
   credit_amount?: number;
   description?: string;
   metadata?: Record<string, any>;
+  settlement_date?: string; // Format: YYYY-MM-DD
 }
 
 export interface PostedEntry {
@@ -47,6 +48,93 @@ export interface LedgerBalanceCheck {
   difference: number;
   is_balanced: boolean;
 }
+
+export interface LedgerEntryRow {
+  id: string;
+  entry_date: Date | string;
+  account_code: string;
+  account_name: string;
+  debit_amount: number | string;
+  credit_amount: number | string;
+  description: string;
+  reference_number: string;
+  transaction_id: string | null;
+  created_at: Date | string;
+}
+
+export interface LedgerEntryCursor {
+  entryDate: string;
+  createdAt: string;
+  id: string;
+}
+
+export interface LedgerEntryPage {
+  entries: LedgerEntryRow[];
+  nextCursor: string | null;
+  hasMore: boolean;
+  limit: number;
+}
+
+const DEFAULT_LEDGER_ENTRY_LIMIT = 100;
+const MAX_LEDGER_ENTRY_LIMIT = 500;
+
+const normalizeLimit = (limit: number): number => {
+  if (!Number.isFinite(limit)) {
+    return DEFAULT_LEDGER_ENTRY_LIMIT;
+  }
+
+  return Math.min(Math.max(Math.trunc(limit), 1), MAX_LEDGER_ENTRY_LIMIT);
+};
+
+const toCursorDate = (value: Date | string): string => {
+  if (value instanceof Date) {
+    return value.toISOString();
+  }
+
+  return value;
+};
+
+const UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export const encodeLedgerEntryCursor = (
+  entry: Pick<LedgerEntryRow, 'entry_date' | 'created_at' | 'id'>
+): string => {
+  const payload: LedgerEntryCursor = {
+    entryDate: toCursorDate(entry.entry_date),
+    createdAt: toCursorDate(entry.created_at),
+    id: entry.id,
+  };
+
+  return Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url');
+};
+
+export const decodeLedgerEntryCursor = (cursor: string): LedgerEntryCursor => {
+  try {
+    const parsed = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8'));
+
+    if (
+      !parsed ||
+      typeof parsed.entryDate !== 'string' ||
+      typeof parsed.createdAt !== 'string' ||
+      typeof parsed.id !== 'string'
+    ) {
+      throw new Error('Cursor is missing required ledger entry fields');
+    }
+
+    if (
+      Number.isNaN(Date.parse(parsed.entryDate)) ||
+      Number.isNaN(Date.parse(parsed.createdAt)) ||
+      !UUID_PATTERN.test(parsed.id)
+    ) {
+      throw new Error('Cursor contains invalid ledger entry values');
+    }
+
+    return parsed;
+  } catch (error) {
+    throw new Error('Invalid ledger entry cursor');
+  }
+};
 
 export class LedgerService {
   private pool: Pool;
@@ -126,6 +214,17 @@ export class LedgerService {
     transactionId: string,
     userId: string
   ): Promise<PostedEntry[]> {
+    // Determine settlement delay from user
+    const { UserModel } = await import('../models/users.js');
+    const userModel = new UserModel();
+    const user = await userModel.findById(userId);
+    const delayDays = user?.settlementDelayDays || 0;
+    
+    // Calculate settlement date
+    const settlementDate = new Date();
+    settlementDate.setDate(settlementDate.getDate() + delayDays);
+    const settlementDateStr = settlementDate.toISOString().split('T')[0];
+
     const entries: LedgerEntry[] = [
       {
         account_code: '1100', // Mobile Money Float
@@ -135,7 +234,8 @@ export class LedgerService {
       {
         account_code: '2000', // Customer Balances
         credit_amount: amount - fee,
-        description: 'Customer balance credited'
+        description: 'Customer balance credited',
+        settlement_date: settlementDateStr
       }
     ];
 
@@ -194,6 +294,40 @@ export class LedgerService {
     return this.postTransaction(
       referenceNumber,
       `Withdrawal: ${amount} (fee: ${fee})`,
+      entries,
+      transactionId,
+      userId
+    );
+  }
+
+  /**
+   * Post a clawback transaction (reversal due to fraud)
+   * Debit: Customer Balances (liability decreases)
+   * Credit: Mobile Money Float (asset decreases)
+   */
+  async postClawback(
+    amount: number,
+    referenceNumber: string,
+    transactionId: string,
+    userId: string,
+    reason: string
+  ): Promise<PostedEntry[]> {
+    const entries: LedgerEntry[] = [
+      {
+        account_code: '2000', // Customer Balances
+        debit_amount: amount,
+        description: `Clawback: ${reason}`
+      },
+      {
+        account_code: '1100', // Mobile Money Float
+        credit_amount: amount,
+        description: `Clawback reversal: ${referenceNumber}`
+      }
+    ];
+
+    return this.postTransaction(
+      referenceNumber,
+      `Clawback: ${amount} - Reason: ${reason}`,
       entries,
       transactionId,
       userId
@@ -332,7 +466,32 @@ export class LedgerService {
     startDate?: Date,
     endDate?: Date,
     limit: number = 100
-  ) {
+  ): Promise<LedgerEntryRow[]> {
+    const page = await this.getEntriesByAccountPage(accountCode, {
+      startDate,
+      endDate,
+      limit,
+    });
+
+    return page.entries;
+  }
+
+  /**
+   * Get a keyset-paginated page of ledger entries for a specific account
+   */
+  async getEntriesByAccountPage(
+    accountCode: string,
+    options: {
+      startDate?: Date;
+      endDate?: Date;
+      limit?: number;
+      cursor?: string;
+    } = {}
+  ): Promise<LedgerEntryPage> {
+    const pageLimit = normalizeLimit(options.limit ?? DEFAULT_LEDGER_ENTRY_LIMIT);
+    const cursor = options.cursor ? decodeLedgerEntryCursor(options.cursor) : null;
+    const queryLimit = pageLimit + 1;
+
     const result = await this.pool.query(
       `SELECT 
         le.id,
@@ -350,11 +509,33 @@ export class LedgerService {
       WHERE a.code = $1
         AND ($2::DATE IS NULL OR le.entry_date >= $2)
         AND ($3::DATE IS NULL OR le.entry_date <= $3)
-      ORDER BY le.entry_date DESC, le.created_at DESC
-      LIMIT $4`,
-      [accountCode, startDate || null, endDate || null, limit]
+        AND (
+          $4::DATE IS NULL
+          OR (le.entry_date, le.created_at, le.id) < ($4::DATE, $5::TIMESTAMP, $6::UUID)
+        )
+      ORDER BY le.entry_date DESC, le.created_at DESC, le.id DESC
+      LIMIT $7`,
+      [
+        accountCode,
+        options.startDate || null,
+        options.endDate || null,
+        cursor?.entryDate || null,
+        cursor?.createdAt || null,
+        cursor?.id || null,
+        queryLimit
+      ]
     );
-    return result.rows;
+
+    const rows = result.rows as LedgerEntryRow[];
+    const hasMore = rows.length > pageLimit;
+    const entries = hasMore ? rows.slice(0, pageLimit) : rows;
+
+    return {
+      entries,
+      nextCursor: hasMore ? encodeLedgerEntryCursor(entries[entries.length - 1]) : null,
+      hasMore,
+      limit: pageLimit,
+    };
   }
 }
 

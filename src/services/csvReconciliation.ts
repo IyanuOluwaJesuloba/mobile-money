@@ -1,6 +1,7 @@
 import { Readable } from "stream";
 import csvParser from "csv-parser";
 import { queryRead } from "../config/database";
+import { DiscrepancyType } from "../models/reconciliation";
 
 export interface ProviderCSVRow {
   reference_number?: string;
@@ -18,6 +19,7 @@ export interface ReconciliationMatch {
   status: string;
   provider_status?: string;
   matched: boolean;
+  discrepancy_type?: DiscrepancyType;
   db_record?: {
     id: string;
     reference_number: string;
@@ -178,8 +180,13 @@ export async function reconcileTransactions(
       };
 
       if (amountMatch && statusMatch) {
+        reconciliationMatch.matched = true;
         matched.push(reconciliationMatch);
       } else {
+        reconciliationMatch.matched = false;
+        reconciliationMatch.discrepancy_type = !amountMatch 
+          ? DiscrepancyType.AmountMismatch 
+          : DiscrepancyType.StatusMismatch;
         discrepancies.push(reconciliationMatch);
       }
     }

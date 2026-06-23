@@ -1,5 +1,6 @@
 import * as StellarSdk from "stellar-sdk";
 import { getStellarServer, getNetworkPassphrase } from "../config/stellar";
+import { resolveToBaseAddress } from "./muxed";
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -229,5 +230,41 @@ export class TrustlineError extends Error {
   constructor(message: string, public readonly asset: StellarSdk.Asset) {
     super(message);
     this.name = "TrustlineError";
+  }
+}
+
+/**
+ * Verifies that `destinationAccount` has a trustline for `asset`.
+ *
+ * Throws a {@link TrustlineError} when the trustline is absent so callers can
+ * surface a clear error before attempting an on-chain payment.
+ *
+ * Supports both G-addresses and M-addresses. M-addresses are resolved to their
+ * underlying G-address before verification.
+ *
+ * @throws {TrustlineError} when the trustline is missing or address is invalid
+ * @throws re-throws unexpected Horizon errors as-is
+ */
+export async function checkDestinationTrustline(
+  destinationAccount: string,
+  asset: StellarSdk.Asset,
+): Promise<void> {
+  // Resolve muxed address to base address
+  let baseAddress: string;
+  try {
+    baseAddress = resolveToBaseAddress(destinationAccount);
+  } catch (error) {
+    throw new TrustlineError(
+      `Invalid destination account ${destinationAccount}: ${error instanceof Error ? error.message : "unknown error"}`,
+      asset,
+    );
+  }
+
+  const trusted = await hasTrustline(baseAddress, asset);
+  if (!trusted) {
+    throw new TrustlineError(
+      `Destination account ${destinationAccount} has no trustline for ${asset.getCode()}`,
+      asset,
+    );
   }
 }

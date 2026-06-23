@@ -12,6 +12,25 @@ interface AuthRequest extends Request {
   user?: User;
 }
 
+type BulkMakerCheckerResult = {
+  actionId: string;
+  status: "success" | "failed";
+  message?: string;
+};
+
+const MAX_BULK_IDS = 100;
+
+const normalizeBulkIds = (value: unknown): string[] => {
+  if (!Array.isArray(value)) return [];
+
+  const ids = value
+    .filter((id): id is string => typeof id === "string")
+    .map((id) => id.trim())
+    .filter((id) => id.length > 0);
+
+  return Array.from(new Set(ids));
+};
+
 // In-memory store (replace with real DB pool in production)
 interface PendingAction {
   id: string;
@@ -106,6 +125,176 @@ router.post(
     return res.status(201).json({
       message: "Action submitted and awaiting checker approval",
       action,
+    });
+  },
+);
+
+/**
+ * POST /api/admin/actions/bulk/approve
+ */
+router.post(
+  "/actions/bulk/approve",
+  requireAdmin,
+  (req: Request, res: Response) => {
+    const checker = (req as AuthRequest).user!;
+    const { checker_note } = req.body;
+
+    const actionIds = normalizeBulkIds(req.body?.actionIds);
+    if (actionIds.length === 0) {
+      return res.status(400).json({
+        message: "actionIds must be a non-empty array of action IDs",
+      });
+    }
+
+    if (actionIds.length > MAX_BULK_IDS) {
+      return res.status(413).json({
+        message: `Too many actionIds supplied (max ${MAX_BULK_IDS})`,
+      });
+    }
+
+    const results: BulkMakerCheckerResult[] = [];
+
+    for (const actionId of actionIds) {
+      try {
+        const action = pendingActions.find((a) => a.id === actionId);
+
+        if (!action) {
+          results.push({ actionId, status: "failed", message: "Action not found" });
+          continue;
+        }
+
+        if (action.status !== "pending") {
+          results.push({
+            actionId,
+            status: "failed",
+            message: `Action is already ${action.status}`,
+          });
+          continue;
+        }
+
+        if (action.maker_id === checker.id) {
+          results.push({
+            actionId,
+            status: "failed",
+            message: "Checker cannot be the same as the Maker",
+          });
+          continue;
+        }
+
+        action.status = "approved";
+        action.checker_id = checker.id;
+        action.checker_note = checker_note || undefined;
+        action.resolved_at = new Date().toISOString();
+
+        const result = executeAction(action);
+        logAudit("ACTION_APPROVED", checker.id, {
+          actionId: action.id,
+          makerId: action.maker_id,
+          action_type: action.action_type,
+          result,
+        });
+
+        results.push({ actionId, status: "success" });
+      } catch (err) {
+        results.push({
+          actionId,
+          status: "failed",
+          message: err instanceof Error ? err.message : "Unknown error",
+        });
+      }
+    }
+
+    const succeeded = results.filter((r) => r.status === "success").length;
+    const failed = results.length - succeeded;
+
+    return res.json({
+      message: "Bulk approve completed",
+      summary: { total: results.length, succeeded, failed },
+      results,
+    });
+  },
+);
+
+/**
+ * POST /api/admin/actions/bulk/reject
+ */
+router.post(
+  "/actions/bulk/reject",
+  requireAdmin,
+  (req: Request, res: Response) => {
+    const checker = (req as AuthRequest).user!;
+    const { checker_note } = req.body;
+
+    const actionIds = normalizeBulkIds(req.body?.actionIds);
+    if (actionIds.length === 0) {
+      return res.status(400).json({
+        message: "actionIds must be a non-empty array of action IDs",
+      });
+    }
+
+    if (actionIds.length > MAX_BULK_IDS) {
+      return res.status(413).json({
+        message: `Too many actionIds supplied (max ${MAX_BULK_IDS})`,
+      });
+    }
+
+    const results: BulkMakerCheckerResult[] = [];
+
+    for (const actionId of actionIds) {
+      try {
+        const action = pendingActions.find((a) => a.id === actionId);
+
+        if (!action) {
+          results.push({ actionId, status: "failed", message: "Action not found" });
+          continue;
+        }
+
+        if (action.status !== "pending") {
+          results.push({
+            actionId,
+            status: "failed",
+            message: `Action is already ${action.status}`,
+          });
+          continue;
+        }
+
+        if (action.maker_id === checker.id) {
+          results.push({
+            actionId,
+            status: "failed",
+            message: "Checker cannot be the same as the Maker",
+          });
+          continue;
+        }
+
+        action.status = "rejected";
+        action.checker_id = checker.id;
+        action.checker_note = checker_note || undefined;
+        action.resolved_at = new Date().toISOString();
+
+        logAudit("ACTION_REJECTED", checker.id, {
+          actionId: action.id,
+          makerId: action.maker_id,
+          action_type: action.action_type,
+        });
+
+        results.push({ actionId, status: "success" });
+      } catch (err) {
+        results.push({
+          actionId,
+          status: "failed",
+          message: err instanceof Error ? err.message : "Unknown error",
+        });
+      }
+    }
+
+    const succeeded = results.filter((r) => r.status === "success").length;
+    const failed = results.length - succeeded;
+
+    return res.json({
+      message: "Bulk reject completed",
+      summary: { total: results.length, succeeded, failed },
+      results,
     });
   },
 );

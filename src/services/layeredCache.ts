@@ -23,6 +23,7 @@ const INVALIDATION_CHANNEL = "cache:invalidate:l1";
 export class LayeredCache {
   private subscriber: any = null;
   private isInitialized = false;
+  private activeRevalidations = new Map<string, Promise<void>>();
 
   /**
    * Initialize Redis subscription for L1 invalidation
@@ -64,7 +65,7 @@ export class LayeredCache {
       const raw = await redisClient.get(key);
       if (!raw) return null;
       
-      const parsed = JSON.parse(raw);
+      const parsed = JSON.parse(raw.toString());
       
       // Populate L1 for future fast access
       // We use the remaining TTL from Redis or a default
@@ -125,18 +126,95 @@ export class LayeredCache {
       try {
         const keys = await redisClient.keys(pattern);
         if (keys.length > 0) {
-          await redisClient.del(keys);
+          await redisClient.del(keys as string[]);
           
           // Propagate invalidation for each key
           for (const key of keys) {
-            l1.del(key);
-            await redisClient.publish(INVALIDATION_CHANNEL, key);
+            const keyStr = key.toString();
+            l1.del(keyStr);
+            await redisClient.publish(INVALIDATION_CHANNEL, keyStr);
           }
         }
       } catch (err) {
         console.warn(`[LayeredCache] DelPattern failed for pattern: ${pattern}`, err);
       }
     }
+  }
+
+  /**
+   * SWR (Stale-While-Revalidate) strategy for caching global configs and high-traffic data.
+   *
+   * @param key The cache key
+   * @param fetcher Async function to fetch fresh data
+   * @param options TTL configuration (fresh TTL + stale TTL)
+   * @returns The cached or freshly fetched data
+   */
+  async getSwr<T>(
+    key: string,
+    fetcher: () => Promise<T>,
+    options: { freshTtlSec: number; staleTtlSec: number }
+  ): Promise<T> {
+    const totalTtlSec = options.freshTtlSec + options.staleTtlSec;
+    const cached = await this.get<{ data: T; freshUntil: number }>(key);
+
+    if (cached) {
+      const isStale = Date.now() > cached.freshUntil;
+
+      if (isStale) {
+        // Background refresh for stale data (0-latency return of stale data)
+        this.revalidateSwr(key, fetcher, totalTtlSec, options.freshTtlSec).catch((err) => {
+          console.error(`[LayeredCache] SWR background revalidation failed for key: ${key}`, err);
+        });
+      }
+      return cached.data;
+    }
+
+    // Cache miss: Wait for fetcher and set
+    const data = await fetcher();
+    await this.set(
+      key,
+      {
+        data,
+        freshUntil: Date.now() + options.freshTtlSec * 1000,
+      },
+      totalTtlSec
+    );
+
+    return data;
+  }
+
+  /**
+   * Internal helper to handle deduplicated background revalidation for SWR
+   */
+  private async revalidateSwr<T>(
+    key: string,
+    fetcher: () => Promise<T>,
+    totalTtlSec: number,
+    freshTtlSec: number
+  ): Promise<void> {
+    // Prevent multiple concurrent revalidations for the same key (thundering herd protection)
+    if (this.activeRevalidations.has(key)) {
+      return this.activeRevalidations.get(key);
+    }
+
+    const promise = (async () => {
+      try {
+        const data = await fetcher();
+        await this.set(
+          key,
+          {
+            data,
+            freshUntil: Date.now() + freshTtlSec * 1000,
+          },
+          totalTtlSec
+        );
+      } finally {
+        this.activeRevalidations.delete(key);
+      }
+    })();
+
+    this.activeRevalidations.set(key, promise);
+    await promise;
   }
 
   /**

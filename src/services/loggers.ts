@@ -1,6 +1,7 @@
 import { NextFunction, Request, RequestHandler, Response } from "express";
 import {
   buildSessionAnomalyAuditEvent,
+  buildSessionFingerprintAnomalyAuditEvent,
   getCurrentRequestIp,
   logSessionAnomaly,
   normalizeIpAddress,
@@ -9,6 +10,7 @@ import {
 
 export {
   buildSessionAnomalyAuditEvent,
+  buildSessionFingerprintAnomalyAuditEvent,
   getCurrentRequestIp,
   logSessionAnomaly,
   normalizeIpAddress,

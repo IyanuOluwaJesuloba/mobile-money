@@ -47,7 +47,7 @@ export class KmsStellarSigner implements StellarHSMProvider {
             KeyId: this.keyId,
             Message: txHash,
             MessageType: "RAW",
-            SigningAlgorithm: "ED25519",
+            SigningAlgorithm: "ED25519" as any,
         });
 
         const response = await this.client.send(command);

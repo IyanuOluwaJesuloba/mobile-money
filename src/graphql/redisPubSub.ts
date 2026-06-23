@@ -18,20 +18,20 @@
  */
 
 import { RedisPubSub } from "graphql-redis-subscriptions";
-import Redis from "ioredis";
+import IORedis from "ioredis";
 import type { TypedPubSub } from "./subscriptions";
 
 const REDIS_URL = process.env.REDIS_URL || "redis://localhost:6379";
 
-const redisOptions: Redis.RedisOptions = {
+const redisOptions: any = {
   retryStrategy: (times) => Math.min(100 + times * 200, 3000),
   enableOfflineQueue: false,
   maxRetriesPerRequest: 1,
   lazyConnect: false,
 };
 
-function makeRedisClient(role: "publisher" | "subscriber"): Redis {
-  const client = new Redis(REDIS_URL, redisOptions);
+function makeRedisClient(role: "publisher" | "subscriber"): IORedis {
+  const client = new IORedis(REDIS_URL, redisOptions);
 
   client.on("error", (err) => {
     if (process.env.NODE_ENV !== "test") {

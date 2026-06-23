@@ -1,330 +1,114 @@
-import { Router, Request, Response } from "express";
-import { rateLimitExport as exportRateLimiter } from "../middleware/rateLimit";
-import QueryStream from "pg-query-stream";
-import { pipeline, Transform } from "stream";
-import ExcelJS from "exceljs";
-import { pool } from "../config/database";
-import { requireAuth } from "../middleware/auth";
-import { TransactionStatus } from "../models/transaction";
-
-type QueryValue = string | string[] | undefined;
-
-export interface TransactionExportFilters {
-  status?: TransactionStatus;
-  provider?: string;
-  type?: "deposit" | "withdraw";
-  phoneNumber?: string;
-  stellarAddress?: string;
-  referenceNumber?: string;
-  from?: Date;
-  to?: Date;
-  tags?: string[];
-  userId?: string;
-}
-
-type QueryStreamFactory = (text: string, values: unknown[]) => unknown;
-
-interface QueryableClient {
-  query(query: unknown): NodeJS.ReadableStream;
-  release(): void;
-}
-
-interface PoolLike {
-  connect(): Promise<QueryableClient>;
-}
-
-interface ExportRouteDependencies {
-  db?: PoolLike;
-  createQueryStream?: QueryStreamFactory;
-}
+import { Router, Request, Response } from 'express';
+import { Transform } from 'stream';
+import { pipeline } from 'stream/promises';
 
 const CSV_HEADERS = [
-  "ID",
-  "Reference Number",
-  "Type",
-  "Amount",
-  "Phone Number",
-  "Provider",
-  "Status",
-  "Stellar Address",
-  "Tags",
-  "Notes",
-  "Admin Notes",
-  "User ID",
-  "Created At",
-  "Updated At",
+  'id',
+  'user_id',
+  'amount',
+  'currency',
+  'type',
+  'status',
+  'created_at',
+  'description'
 ];
 
-function singleQueryValue(value: QueryValue): string | undefined {
-  return Array.isArray(value) ? value[0] : value;
-}
-
-function parseDate(value: string, label: string): Date {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
-    throw new Error(`Invalid ${label} date`);
-  }
-  return date;
-}
-
-export function parseTransactionExportFilters(
-  query: Request["query"],
-): TransactionExportFilters {
-  const status = singleQueryValue(query.status as QueryValue);
-  const provider = singleQueryValue(query.provider as QueryValue);
-  const type = singleQueryValue(query.type as QueryValue);
-  const phoneNumber =
-    singleQueryValue(query.phoneNumber as QueryValue) ??
-    singleQueryValue(query.phone as QueryValue);
-  const stellarAddress = singleQueryValue(query.stellarAddress as QueryValue);
-  const referenceNumber = singleQueryValue(query.referenceNumber as QueryValue);
-  const from = singleQueryValue(query.from as QueryValue);
-  const to = singleQueryValue(query.to as QueryValue);
-  const tags = singleQueryValue(query.tags as QueryValue);
-
-  if (
-    status &&
-    !Object.values(TransactionStatus).includes(status as TransactionStatus)
-  ) {
-    throw new Error(
-      `Invalid status. Expected one of: ${Object.values(TransactionStatus).join(", ")}`,
-    );
-  }
-
-  if (type && type !== "deposit" && type !== "withdraw") {
-    throw new Error("Invalid type. Expected one of: deposit, withdraw");
-  }
-
-  const filters: TransactionExportFilters = {};
-
-  if (status) filters.status = status as TransactionStatus;
-  if (provider) filters.provider = provider;
-  if (type) filters.type = type as "deposit" | "withdraw";
-  if (phoneNumber) filters.phoneNumber = phoneNumber;
-  if (stellarAddress) filters.stellarAddress = stellarAddress;
-  if (referenceNumber) filters.referenceNumber = referenceNumber;
-  if (from) filters.from = parseDate(from, "from");
-  if (to) filters.to = parseDate(to, "to");
-  if (tags) {
-    filters.tags = tags
-      .split(",")
-      .map((tag) => tag.trim())
-      .filter(Boolean);
-  }
-
-  return filters;
-}
-
-export function buildTransactionExportQuery(
-  filters: TransactionExportFilters,
-): {
-  text: string;
-  values: unknown[];
-} {
-  const whereClauses: string[] = [];
-  const values: unknown[] = [];
-
-  const addClause = (
-    clauseFactory: (index: number) => string,
-    value: unknown,
-  ) => {
-    values.push(value);
-    whereClauses.push(clauseFactory(values.length));
-  };
-
-  if (filters.status) addClause((i) => `status = $${i}`, filters.status);
-  if (filters.provider) addClause((i) => `provider = $${i}`, filters.provider);
-  if (filters.type) addClause((i) => `type = $${i}`, filters.type);
-  if (filters.phoneNumber) {
-    addClause((i) => `phone_number = $${i}`, filters.phoneNumber);
-  }
-  if (filters.stellarAddress) {
-    addClause((i) => `stellar_address = $${i}`, filters.stellarAddress);
-  }
-  if (filters.referenceNumber) {
-    addClause((i) => `reference_number = $${i}`, filters.referenceNumber);
-  }
-  if (filters.from) addClause((i) => `created_at >= $${i}`, filters.from);
-  if (filters.to) addClause((i) => `created_at <= $${i}`, filters.to);
-  if (filters.tags?.length) {
-    addClause((i) => `tags @> $${i}::text[]`, filters.tags);
-  }
-  if (filters.userId) {
-    addClause((i) => `user_id = $${i}`, filters.userId);
-  }
-
-  const whereSql =
-    whereClauses.length > 0 ? ` WHERE ${whereClauses.join(" AND ")}` : "";
-
+function parseTransactionExportFilters(query: any) {
   return {
-    text:
-      `SELECT id, reference_number, type, amount, phone_number, provider, status, ` +
-      `stellar_address, tags, notes, admin_notes, user_id, created_at, updated_at ` +
-      `FROM transactions${whereSql} ORDER BY created_at DESC`,
-    values,
+    startDate: query.startDate,
+    endDate: query.endDate,
+    status: query.status,
+    type: query.type,
+    userId: query.userId,
   };
 }
 
-function formatReadableDate(value: unknown): string {
-  const date =
-    value instanceof Date
-      ? value
-      : typeof value === "string" || typeof value === "number"
-        ? new Date(value)
-        : null;
-
-  if (!date || Number.isNaN(date.getTime())) {
-    return "";
-  }
-
-  const pad = (n: number) => String(n).padStart(2, "0");
-
-  return (
-    [
-      date.getUTCFullYear(),
-      pad(date.getUTCMonth() + 1),
-      pad(date.getUTCDate()),
-    ].join("-") +
-    " " +
-    [
-      pad(date.getUTCHours()),
-      pad(date.getUTCMinutes()),
-      pad(date.getUTCSeconds()),
-    ].join(":")
-  );
+function getScopedUserId(req: Request): string | null {
+  // Extract user ID from authenticated request
+  return (req as any).user?.id || null;
 }
 
-function escapeCsvValue(value: unknown): string {
-  if (value === null || value === undefined) {
-    return "";
+function buildTransactionExportQuery(filters: any) {
+  const conditions = [];
+  const values = [];
+  let paramCount = 1;
+
+  if (filters.userId) {
+    conditions.push(`user_id = $${paramCount++}`);
+    values.push(filters.userId);
   }
 
-  const raw = Array.isArray(value)
-    ? value.map((item) => String(item)).join("|")
-    : String(value);
+  if (filters.startDate) {
+    conditions.push(`created_at >= $${paramCount++}`);
+    values.push(filters.startDate);
+  }
 
-  const escaped = raw.replace(/"/g, '""');
-  return /[",\r\n]/.test(escaped) ? `"${escaped}"` : escaped;
+  if (filters.endDate) {
+    conditions.push(`created_at <= $${paramCount++}`);
+    values.push(filters.endDate);
+  }
+
+  if (filters.status) {
+    conditions.push(`status = $${paramCount++}`);
+    values.push(filters.status);
+  }
+
+  if (filters.type) {
+    conditions.push(`type = $${paramCount++}`);
+    values.push(filters.type);
+  }
+
+  const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+  const text = `SELECT * FROM transactions ${whereClause} ORDER BY created_at DESC`;
+
+  return { text, values };
 }
 
 function transactionRowToCsv(row: Record<string, unknown>): string {
-  const fields = [
-    row.id,
-    row.reference_number,
-    row.type,
-    row.amount,
-    row.phone_number,
-    row.provider,
-    row.status,
-    row.stellar_address,
-    row.tags,
-    row.notes,
-    row.admin_notes,
-    row.user_id,
-    formatReadableDate(row.created_at),
-    formatReadableDate(row.updated_at),
-  ];
-
-  return `${fields.map(escapeCsvValue).join(",")}\n`;
-}
-
-function defaultQueryStreamFactory(text: string, values: unknown[]): unknown {
-  return new QueryStream(text, values, { batchSize: 250 });
-}
-
-function getScopedUserId(req: Request): string | undefined {
-  const requestWithAuth = req as Request & {
-    jwtUser?: { userId?: string; role?: string };
-    user?: { id?: string; role?: string };
-  };
-  const authUserId =
-    requestWithAuth.jwtUser?.userId ?? requestWithAuth.user?.id;
-  const role = requestWithAuth.jwtUser?.role ?? requestWithAuth.user?.role;
-
-  if (!authUserId || role === "admin" || authUserId === "admin-system") {
-    return undefined;
-  }
-
-  return authUserId;
-}
-
-function transactionRowToWorksheetRow(row: Record<string, unknown>): unknown[] {
-  return [
-    row.id ?? "",
-    row.reference_number ?? "",
-    row.type ?? "",
-    row.amount ?? "",
-    row.phone_number ?? "",
-    row.provider ?? "",
-    row.status ?? "",
-    row.stellar_address ?? "",
-    Array.isArray(row.tags) ? row.tags.join("|") : (row.tags ?? ""),
-    row.notes ?? "",
-    row.admin_notes ?? "",
-    row.user_id ?? "",
-    formatReadableDate(row.created_at),
-    formatReadableDate(row.updated_at),
-  ];
-}
-
-async function streamTransactionsAsXlsx(
-  rowStream: NodeJS.ReadableStream,
-  res: Response,
-): Promise<void> {
-  const workbook = new ExcelJS.stream.xlsx.WorkbookWriter({
-    stream: res,
-    useStyles: false,
-    useSharedStrings: false,
+  const values = CSV_HEADERS.map(header => {
+    const value = row[header];
+    if (value === null || value === undefined) return '';
+    const stringValue = String(value);
+    // Escape commas and quotes
+    if (stringValue.includes(',') || stringValue.includes('"') || stringValue.includes('\n')) {
+      return `"${stringValue.replace(/"/g, '""')}"`;
+    }
+    return stringValue;
   });
-
-  const sheet = workbook.addWorksheet("Transactions");
-  sheet.addRow(CSV_HEADERS).commit();
-
-  for await (const row of rowStream as AsyncIterable<Record<string, unknown>>) {
-    sheet.addRow(transactionRowToWorksheetRow(row)).commit();
-  }
-
-  sheet.commit();
-  await workbook.commit();
+  return values.join(',') + '\n';
 }
 
-const exportRateLimiterMiddleware = exportRateLimiter;
+export function createExportRoutes(options?: {
+  db?: any;
+  createQueryStream?: any;
+}) {
+  const db = options?.db || require("../config/database").pool;
+  const createQueryStream = options?.createQueryStream || require("pg-query-stream");
 
-export function createExportRoutes(
-  dependencies: ExportRouteDependencies = {},
-): Router {
   const router = Router();
-  const db = dependencies.db ?? pool;
-  const createQueryStream =
-    dependencies.createQueryStream ?? defaultQueryStreamFactory;
 
-  router.get(
-    "/export",
-    exportRateLimiterMiddleware,
-    requireAuth,
-    async (req: Request, res: Response) => {
-      let client: QueryableClient | null = null;
-      let released = false;
-
-      const releaseClient = () => {
-        if (client && !released) {
-          released = true;
-          client.release();
-        }
-      };
-
-    const releaseClient = () => {
-      if (client && !released) {
-        released = true;
+  router.get("/export", async (req: Request, res: Response) => {
+    let client: any;
+    let clientReleased = false;
+    let releaseClient = () => {
+      if (!clientReleased && client) {
         client.release();
+        clientReleased = true;
       }
     };
 
     try {
       const filters = parseTransactionExportFilters(req.query);
+      const scopedUserId = getScopedUserId(req);
+
+      if (scopedUserId) {
+        filters.userId = scopedUserId;
+      }
+
       const { text, values } = buildTransactionExportQuery(filters);
 
       client = await db.connect();
+      releaseClient = () => client.release();
       const queryStream = createQueryStream(text, values);
       const rowStream = client.query(queryStream);
 
@@ -332,13 +116,17 @@ export function createExportRoutes(
       const filename = `transactions-${new Date().toISOString().slice(0, 10)}.${format}`;
 
       res.status(200);
-      res.setHeader("Content-Type", format === "json" ? "application/json" : "text/csv; charset=utf-8");
+      res.setHeader(
+        "Content-Type",
+        format === "json" ? "application/json" : "text/csv; charset=utf-8",
+      );
       res.setHeader(
         "Content-Disposition",
         `attachment; filename="${filename}"`,
       );
 
       let transform: Transform;
+
       if (format === "csv") {
         res.write(`${CSV_HEADERS.join(",")}\n`);
         transform = new Transform({
@@ -353,7 +141,8 @@ export function createExportRoutes(
         transform = new Transform({
           objectMode: true,
           transform(chunk: Record<string, unknown>, _encoding, callback) {
-            const data = (first ? "" : ",\n") + JSON.stringify(chunk, null, 2);
+            const data =
+              (first ? "" : ",\n") + JSON.stringify(chunk, null, 2);
             first = false;
             callback(null, data);
           },
@@ -368,64 +157,18 @@ export function createExportRoutes(
         if ("destroy" in rowStream && typeof rowStream.destroy === "function") {
           rowStream.destroy();
         }
-        const { text, values } = buildTransactionExportQuery(filters);
+        releaseClient();
+      });
 
-        client = await db.connect();
-        const queryStream = createQueryStream(text, values);
-        const rowStream = client.query(queryStream);
-
-        const filename = `transactions-${new Date().toISOString().slice(0, 10)}.csv`;
-        res.status(200);
-        res.setHeader("Content-Type", "text/csv; charset=utf-8");
-        res.setHeader(
-          "Content-Disposition",
-          `attachment; filename="${filename}"`,
-        );
-        res.write(`${CSV_HEADERS.join(",")}\n`);
-
-        const csvTransform = new Transform({
-          objectMode: true,
-          transform(chunk: Record<string, unknown>, _encoding, callback) {
-            callback(null, transactionRowToCsv(chunk));
-          },
-        });
-
-        res.on("close", () => {
-          if (
-            "destroy" in rowStream &&
-            typeof rowStream.destroy === "function"
-          ) {
-            rowStream.destroy();
-          }
-          releaseClient();
-        });
-
-      pipeline(
-        rowStream,
-        transform,
-        res,
-        (error) => {
-          releaseClient();
-          if (error) {
-            console.error("Transaction CSV export failed:", error);
-          }
-        },
-      );
+      await pipeline(rowStream, transform, res);
     } catch (error) {
+      console.error("Transaction export failed:", error);
       releaseClient();
-      const message =
-        error instanceof Error ? error.message : "Failed to export transactions";
-      const statusCode = message.startsWith("Invalid") ? 400 : 500;
       if (!res.headersSent) {
-        res.status(statusCode).json({ error: message });
-      } else {
-        console.error("Error after headers sent:", message);
-        res.end();
+        res.status(500).json({ error: "Export failed" });
       }
     }
   });
 
   return router;
 }
-
-export const exportRoutes = createExportRoutes();

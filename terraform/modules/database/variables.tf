@@ -66,34 +66,3 @@ variable "db_backup_retention_days" {
   type        = number
   default     = 7
 }
-
-# ── Disaster Recovery ──────────────────────────────────────────────────────
-variable "dr_replica_enabled" {
-  description = "Create a cross-region read replica for disaster recovery"
-  type        = bool
-  default     = false
-}
-
-variable "dr_region" {
-  description = "AWS region for the DR replica (e.g. eu-west-1)"
-  type        = string
-  default     = "eu-west-1"
-}
-
-variable "dr_replica_instance_class" {
-  description = "RDS instance class for the DR replica"
-  type        = string
-  default     = "db.t3.small"
-}
-
-variable "dr_private_subnet_ids" {
-  description = "Private subnet IDs in the DR region for the replica subnet group"
-  type        = list(string)
-  default     = []
-}
-
-variable "dr_security_group_id" {
-  description = "Security group ID in the DR region for the replica"
-  type        = string
-  default     = ""
-}

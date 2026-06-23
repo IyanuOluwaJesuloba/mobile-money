@@ -1,0 +1,22 @@
+{
+  "name": "mobile-money-docs-portal",
+  "private": true,
+  "version": "1.0.0",
+  "scripts": {
+    "sync:openapi": "cp ../openapi.yaml ./static/openapi.yaml",
+    "start": "npm run sync:openapi && docusaurus start --port 3001",
+    "build": "npm run sync:openapi && docusaurus build",
+    "serve": "docusaurus serve",
+    "deploy": "docusaurus deploy"
+  },
+  "dependencies": {
+    "@docusaurus/core": "3.9.2",
+    "@docusaurus/preset-classic": "3.9.2",
+    "@mdx-js/react": "^3.1.1",
+    "clsx": "^2.1.1",
+    "prism-react-renderer": "^2.4.1",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "redoc": "^2.5.1"
+  }
+}

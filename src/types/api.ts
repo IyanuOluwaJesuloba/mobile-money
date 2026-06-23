@@ -175,6 +175,7 @@ export interface LimitExceededErrorResponse extends ErrorResponse {
 export interface HealthCheckResponse {
   status: "ok";
   timestamp: string;
+  gitHash?: string;
 }
 
 export interface ReadinessCheckResponse {

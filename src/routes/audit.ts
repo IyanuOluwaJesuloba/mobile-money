@@ -8,6 +8,7 @@ import {
   reviewAmlAlert,
   searchAmlAlertsByUser,
   getAmlDashboardStats,
+  markAlertForSAR,
 } from "../controllers/amlAuditController";
 
 export const auditRoutes = Router();
@@ -63,4 +64,13 @@ auditRoutes.patch(
   haltOnTimedout,
   authorizeObj("aml_alerts", "write"),
   reviewAmlAlert,
+);
+
+// Manually trigger SAR generation for an alert
+auditRoutes.post(
+  "/aml/alerts/:alertId/sar",
+  TimeoutPresets.quick,
+  haltOnTimedout,
+  authorizeObj("aml_alerts", "write"),
+  markAlertForSAR,
 );

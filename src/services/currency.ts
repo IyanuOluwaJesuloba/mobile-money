@@ -1,4 +1,6 @@
 import axios from "axios";
+import { exchangeRateBufferService, BufferedRate } from "./exchangeRateBufferService";
+
 
 // ---------------------------------------------------------------------------
 // Supported currencies
@@ -154,6 +156,59 @@ export class CurrencyService {
   convertToBase(amount: number, currency: SupportedCurrency): ConversionResult {
     return this.convert(amount, currency, BASE_CURRENCY);
   }
+
+  /**
+   * Convert with a provider-specific buffer applied to protect against
+   * exchange rate volatility. The buffer is resolved from the
+   * exchange_rate_buffers table.
+   *
+   * @param amount    Amount in the source currency
+   * @param from      Source currency
+   * @param to        Target currency
+   * @param provider  Mobile money provider slug (e.g. 'mtn', 'airtel')
+   * @param direction 'sell' = user sells `from` for `to` (platform buys)
+   *                  'buy'  = user buys `from` with `to` (platform sells)
+   */
+  async convertWithBuffer(
+    amount: number,
+    from: SupportedCurrency,
+    to: SupportedCurrency,
+    provider: string,
+    direction: "sell" | "buy" = "sell",
+  ): Promise<ConversionResult & { buffer: BufferedRate }> {
+    if (amount < 0) throw new Error("Amount must be non-negative");
+
+    const rawResult = this.convert(amount, from, to);
+    const buffer = await exchangeRateBufferService.applyBuffer(
+      rawResult.rate,
+      provider,
+      from,
+      to,
+      direction,
+    );
+
+    const convertedAmount = amount * buffer.bufferedRate;
+
+    return {
+      originalAmount: amount,
+      originalCurrency: from,
+      convertedAmount: Math.round(convertedAmount * 1e7) / 1e7,
+      baseCurrency: to,
+      rate: buffer.bufferedRate,
+      buffer,
+    };
+  }
+
+  /** Convenience: convert to base currency with buffer applied. */
+  async convertToBaseWithBuffer(
+    amount: number,
+    currency: SupportedCurrency,
+    provider: string,
+    direction: "sell" | "buy" = "sell",
+  ): Promise<ConversionResult & { buffer: BufferedRate }> {
+    return this.convertWithBuffer(amount, currency, BASE_CURRENCY, provider, direction);
+  }
+
 
   /** Return snapshot of cache state for health checks. */
   getStatus(): CurrencyServiceStatus {

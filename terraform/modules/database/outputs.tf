@@ -23,13 +23,3 @@ output "db_connection_url" {
   value       = "postgresql://${aws_db_instance.main.username}:${var.db_password}@${aws_db_instance.main.endpoint}/${aws_db_instance.main.db_name}"
   sensitive   = true
 }
-
-output "dr_replica_endpoint" {
-  description = "DR replica endpoint (empty when dr_replica_enabled = false)"
-  value       = var.dr_replica_enabled ? aws_db_instance.dr_replica[0].endpoint : ""
-}
-
-output "dr_replica_arn" {
-  description = "DR replica ARN — used to promote via aws rds promote-read-replica"
-  value       = var.dr_replica_enabled ? aws_db_instance.dr_replica[0].arn : ""
-}

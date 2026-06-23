@@ -43,10 +43,16 @@ function getCircuitKey(provider: string, operation: string): string {
   return `${provider}:${operation}`;
 }
 
-function getBreakerOptions(name: string): CircuitBreakerOptions {
+async function getBreakerOptions(name: string, provider: string): Promise<CircuitBreakerOptions> {
+  const { providerSettingsService } = await import("../services/providerSettingsService.js");
+  const settings = await providerSettingsService.getProviderSettings(provider);
+
+  const timeoutMs = settings ? settings.timeout_ms : Number(process.env.PROVIDER_CIRCUIT_BREAKER_TIMEOUT_MS ?? 5_000);
+  const volumeThreshold = settings ? settings.failure_threshold : Number(process.env.PROVIDER_CIRCUIT_BREAKER_VOLUME_THRESHOLD ?? 3);
+
   return {
     name,
-    timeout: Number(process.env.PROVIDER_CIRCUIT_BREAKER_TIMEOUT_MS ?? 5_000),
+    timeout: timeoutMs,
     resetTimeout: Number(
       process.env.PROVIDER_CIRCUIT_BREAKER_RESET_TIMEOUT_MS ?? 30_000,
     ),
@@ -56,9 +62,7 @@ function getBreakerOptions(name: string): CircuitBreakerOptions {
     rollingCountBuckets: Number(
       process.env.PROVIDER_CIRCUIT_BREAKER_ROLLING_BUCKETS ?? 10,
     ),
-    volumeThreshold: Number(
-      process.env.PROVIDER_CIRCUIT_BREAKER_VOLUME_THRESHOLD ?? 3,
-    ),
+    volumeThreshold: volumeThreshold,
     errorThresholdPercentage: Number(
       process.env.PROVIDER_CIRCUIT_BREAKER_ERROR_THRESHOLD_PERCENTAGE ?? 50,
     ),
@@ -105,20 +109,22 @@ function normalizeResult<T>(
   throw toExecutionError(result.error);
 }
 
-function getOrCreateCircuitBreaker<T>(
+async function getOrCreateCircuitBreaker<T>(
   provider: string,
   operation: string,
-): ProviderCircuitBreaker<T> {
+): Promise<ProviderCircuitBreaker<T>> {
   const key = getCircuitKey(provider, operation);
   const existing = circuitBreakers.get(key);
   if (existing) {
     return existing as ProviderCircuitBreaker<T>;
   }
 
+  const options = await getBreakerOptions(key, provider);
+
   const breaker = new CircuitBreaker<
     [BreakerInvocation<T>, BreakerFallback<T> | undefined],
     CircuitBreakerActionResult<T>
-  >(async (execute) => normalizeResult(await execute()), getBreakerOptions(key));
+  >(async (execute) => normalizeResult(await execute()), options);
 
   breaker.fallback(async (_execute, fallback, error) => {
     if (!fallback) {
@@ -149,7 +155,7 @@ function getOrCreateCircuitBreaker<T>(
 export async function executeWithCircuitBreaker<T>(
   options: ExecuteWithCircuitBreakerOptions<T>,
 ): Promise<CircuitBreakerActionResult<T>> {
-  const breaker = getOrCreateCircuitBreaker<T>(
+  const breaker = await getOrCreateCircuitBreaker<T>(
     options.provider,
     options.operation,
   );
@@ -172,6 +178,15 @@ export function resetCircuitBreakers(): void {
   circuitBreakers.clear();
 }
 
+export function resetCircuitBreakerForProvider(provider: string): void {
+  for (const [key, breaker] of circuitBreakers.entries()) {
+    if (key.startsWith(`${provider}:`)) {
+      breaker.shutdown();
+      circuitBreakers.delete(key);
+    }
+  }
+}
+
 export async function checkAndResetCircuitBreaker(provider: string, operation: string): Promise<boolean> {
   const key = getCircuitKey(provider, operation);
   const breaker = circuitBreakers.get(key);
@@ -180,12 +195,12 @@ export async function checkAndResetCircuitBreaker(provider: string, operation: s
   }
 
   // Only reset if open
-  if (breaker.opened) {
+  if ((breaker as any).opened) {
     try {
       const healthResult = await checkMobileMoneyHealth();
       const providerHealth = healthResult.providers[provider as keyof typeof healthResult.providers];
       if (providerHealth && providerHealth.status === "up") {
-        breaker.close();
+        (breaker as any).close();
         console.log(`Circuit breaker for ${provider}:${operation} reset due to health check`);
         return true;
       }

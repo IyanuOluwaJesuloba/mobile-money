@@ -3,6 +3,10 @@ import { verifyOAuthAccessToken } from "../auth/oauth";
 import { verifyToken, JWTPayload } from "../auth/jwt";
 import { ADMIN_API_KEY } from "../config/env";
 import { redisClient } from "../config/redis";
+import { getAdminSep10Service } from "../stellar/adminSep10";
+import { evaluateGeoLoginAccess } from "../auth/geo";
+import { queryRead } from "../config/database";
+import { ScopeGroup } from "../auth/apikeys";
 
 type RequestUser = {
   id: string;
@@ -69,32 +73,64 @@ declare module "express-serve-static-core" {
 }
 
 /**
- * Middleware to require a valid administrative API key or token.
- * For this implementation, we check for an X-API-Key header.
+ * Middleware to require a valid administrative API key, OAuth token, or admin SEP-10 token.
+ *
+ * API key resolution order:
+ *  1. Match against DB `api_keys` table — attaches the key's real `permissions` bitmask.
+ *  2. Fall back to ADMIN_API_KEY env var (system key) — grants ScopeGroup.FULL_ACCESS.
  */
-export const requireAuth = (
+export const requireAuth = async (
   req: Request,
   res: Response,
   next: NextFunction,
 ) => {
   const apiKey = req.header("X-API-Key");
-  const adminKey = ADMIN_API_KEY;
 
-  if (apiKey && apiKey === adminKey) {
-    (req as AuthRequest).user = {
-      id: "admin-system",
-      role: "admin",
-    };
-    // Issue #518: Admin keys get full permissions
-    (req as any).apiKeyPermissions = 0x0f; // ApiKeyPermission.ALL
+  if (apiKey) {
+    // 1. Look up from the database first (scoped keys)
+    try {
+      const result = await queryRead(
+        `SELECT permissions, is_active, expires_at
+           FROM api_keys
+          WHERE key = $1
+          LIMIT 1`,
+        [apiKey],
+      );
 
-    return next();
+      if (result.rows.length > 0) {
+        const row = result.rows[0];
+        if (!row.is_active) {
+          return res.status(401).json({ error: "Unauthorized", message: "API key is inactive" });
+        }
+        if (row.expires_at && new Date(row.expires_at) < new Date()) {
+          return res.status(401).json({ error: "Unauthorized", message: "API key has expired" });
+        }
+
+        (req as AuthRequest).user = { id: "api-key-user", role: "admin" };
+        (req as any).apiKeyPermissions = row.permissions;
+        return next();
+      }
+    } catch (err) {
+      // DB lookup failure — fall through to env-var check so a DB outage doesn't
+      // lock out the system admin key.
+      console.error("[requireAuth] DB api_keys lookup failed:", err);
+    }
+
+    // 2. Fall back to system ADMIN_API_KEY env var
+    if (apiKey === ADMIN_API_KEY) {
+      (req as AuthRequest).user = { id: "admin-system", role: "admin" };
+      (req as any).apiKeyPermissions = ScopeGroup.FULL_ACCESS;
+      return next();
+    }
+
+    return res.status(401).json({ error: "Unauthorized", message: "Invalid API key" });
   }
 
   const authorization = req.header("Authorization");
   const bearerToken = authorization?.match(/^Bearer\s+(.+)$/i)?.[1];
 
   if (bearerToken) {
+    // First try OAuth token
     try {
       const claims = verifyOAuthAccessToken(bearerToken);
       (req as AuthRequest).user = {
@@ -103,31 +139,47 @@ export const requireAuth = (
         clientId: claims.client_id,
         scopes: claims.scope.split(/\s+/).filter(Boolean),
       };
-
       return next();
     } catch {
-      return res.status(401).json({
-        error: "Unauthorized",
-        message: "Invalid or expired bearer token",
-      });
+      // If OAuth fails, try admin SEP-10 token
+      try {
+        const adminSep10Service = getAdminSep10Service();
+        const decoded = adminSep10Service.verifyToken(bearerToken);
+        if (decoded.sub) {
+          (req as AuthRequest).user = {
+            id: decoded.sub,
+            role: "admin",
+            stellarPublicKey: decoded.sub,
+          };
+          return next();
+        }
+      } catch {
+        // SEP-10 verification also failed
+      }
     }
+
+    return res.status(401).json({
+      error: "Unauthorized",
+      message: "Invalid or expired bearer token",
+    });
   }
 
   return res.status(401).json({
     error: "Unauthorized",
-    message: "Valid administrative API key or OAuth bearer token required",
+    message: "Valid administrative API key or bearer token required",
   });
 };
 
 /**
  * JWT Authentication middleware that verifies JWT tokens
  * and attaches user information to the request object
+ * Includes IP geofencing validation for operational regions
  */
-export function authenticateToken(
+export async function authenticateToken(
   req: Request,
   res: Response,
   next: NextFunction,
-): void {
+): Promise<void> {
   const authHeader = req.headers.authorization;
   const token = authHeader && authHeader.split(" ")[1]; // Bearer TOKEN
 
@@ -144,6 +196,17 @@ export function authenticateToken(
     if (rejectMutationDuringImpersonation(req, res, decoded)) {
       return;
     }
+
+    // IP Geofencing validation
+    const geoAccess = await evaluateGeoLoginAccess(req);
+    if (!geoAccess.allowed) {
+      res.status(403).json({
+        error: "Access denied",
+        message: geoAccess.reason || "Access from this region is not permitted",
+      });
+      return;
+    }
+
     req.jwtUser = decoded;
     next();
   } catch (error) {

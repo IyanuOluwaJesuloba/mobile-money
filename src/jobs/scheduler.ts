@@ -8,6 +8,7 @@ import { runDisputeSlaJob } from "./disputeSlaJob";
 import { runBalanceMonitorJob } from "./balanceMonitorJob";
 import { runSep31MonitorJob } from "./sep31MonitorJob";
 import { runFeeBumpJob } from "./feeBumpJob";
+import { runSep31FeeBumpJob } from "./sep31FeeBumpJob";
 import { MonitoringService } from "../services/monitoringService";
 import { createPagerDutyService } from "../services/pagerDutyService";
 import { runProviderBalanceAlertJob } from "./balances";
@@ -16,6 +17,17 @@ import { runKycTierUpgradeJob } from "./kycTierUpgradeJob";
 import { runLiquidityRebalanceJob } from "./liquidityRebalanceJob";
 import { runCrossChainMonitorJob } from "./crossChainMonitorJob";
 import { runDailySettlementJob } from "./dailySettlementJob";
+import { runDailyProviderReconciliation } from "./providerReconciliationJob";
+import { runReconciliationJob } from "./reconciliationJob";
+import { runDatabaseBackupJob } from "./databaseBackupJob";
+import { runDatabaseBackupVerifyJob } from "./databaseBackupVerifyJob";
+import {
+  INDEX_REINDEX_CRON,
+  INDEX_REINDEX_JOB_ENABLED,
+} from "../config/env";
+import { runIndexReindexJob } from "./indexReindexJob";
+import { runSanctionSyncJob } from "./sanctionSyncJob";
+import { startNotificationWorker } from "../workers/notificationWorker";
 
 interface JobConfig {
   name: string;
@@ -24,6 +36,12 @@ interface JobConfig {
 }
 
 const JOBS: JobConfig[] = [
+  {
+    name: "sanction-sync",
+    // Daily at 1:00 AM - syncs internal sanction list with global lists
+    schedule: process.env.SANCTION_SYNC_CRON || "0 1 * * *",
+    handler: runSanctionSyncJob,
+  },
   {
     name: "cleanup",
     // Daily at 2:00 AM - deletes old completed/failed transactions
@@ -67,6 +85,12 @@ const JOBS: JobConfig[] = [
     handler: runFeeBumpJob,
   },
   {
+    name: "sep31-fee-bump",
+    // Every 30 seconds - bumps fees for stuck SEP-31 transactions
+    schedule: process.env.SEP31_FEE_BUMP_CRON || "*/30 * * * * *",
+    handler: runSep31FeeBumpJob,
+  },
+  {
     name: "provider-balance-alert",
     // Every 10 minutes - checks MTN/Airtel operational balances and alerts treasury when low
     schedule: process.env.PROVIDER_BALANCE_ALERT_CRON || "*/10 * * * *",
@@ -83,12 +107,53 @@ const JOBS: JobConfig[] = [
     // Daily at 01:00 AM UTC — sweeps merchant fees and settles provider balances
     schedule: process.env.DAILY_SETTLEMENT_CRON || "0 1 * * *",
     handler: runDailySettlementJob,
+    name: "provider-reconciliation",
+    // Daily at 4:00 AM - runs automated reconciliation against provider CSV reports
+    schedule: process.env.PROVIDER_RECONCILIATION_CRON || "0 4 * * *",
+    handler: runDailyProviderReconciliation,
   },
   {
     name: "monthly-invoice",
     // 1st of every month at midnight
     schedule: "0 0 1 * *",
     handler: runMonthlyInvoiceJob,
+  },
+  ...(INDEX_REINDEX_JOB_ENABLED
+    ? [
+        {
+          name: "index-reindex",
+          // Daily at 3:00 AM by default - reindexes bloated indexes during low traffic
+          schedule: INDEX_REINDEX_CRON,
+          handler: runIndexReindexJob,
+        },
+      ]
+    : []),
+  {
+    name: "subscriptions",
+    // Default: run every minute to pick up due subscriptions
+    schedule: process.env.SUBSCRIPTION_CRON || "*/1 * * * *",
+    handler: async () => {
+      const { runSubscriptionJob } = await import("./subscriptionJob.js");
+      return runSubscriptionJob();
+    },
+  },
+  {
+    name: "reconciliation",
+    // Daily at 5:00 AM
+    schedule: process.env.RECONCILIATION_CRON || "0 5 * * *",
+    handler: runReconciliationJob,
+  },
+  {
+    name: "database-backup",
+    // Daily at 2:00 AM
+    schedule: process.env.DATABASE_BACKUP_CRON || "0 2 * * *",
+    handler: runDatabaseBackupJob,
+  },
+  {
+    name: "database-backup-verify",
+    // Daily at 3:00 AM
+    schedule: process.env.DATABASE_BACKUP_VERIFY_CRON || "0 3 * * *",
+    handler: runDatabaseBackupVerifyJob,
   },
 ];
 
@@ -120,4 +185,11 @@ export function startJobs(): void {
     cron.schedule(job.schedule, () => runJob(job));
     console.log(`[scheduler] "${job.name}" scheduled - ${job.schedule}`);
   }
+
+  // Start the notification worker which listens for Redis pub/sub events
+  // and drives user-facing notifications in real-time. This replaces any
+  // DB-polling notification mechanisms.
+  startNotificationWorker().catch((err) => {
+    console.warn("Failed to start NotificationWorker:", err);
+  });
 }

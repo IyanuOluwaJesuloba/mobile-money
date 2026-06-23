@@ -26,16 +26,6 @@ output "db_connection_url" {
   sensitive   = true
 }
 
-output "dr_replica_endpoint" {
-  description = "DR replica endpoint — set as DR_DATABASE_URL during failover"
-  value       = module.database.dr_replica_endpoint
-}
-
-output "dr_replica_arn" {
-  description = "DR replica ARN — pass to aws rds promote-read-replica during failover"
-  value       = module.database.dr_replica_arn
-}
-
 # ── Redis ──────────────────────────────────────────────────────────────────
 output "redis_endpoint" {
   description = "ElastiCache Redis primary endpoint"

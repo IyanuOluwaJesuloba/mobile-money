@@ -6,6 +6,8 @@
  */
 
 import { currencyService, SupportedCurrency } from "../currency";
+import { exchangeRateBufferService } from "../exchangeRateBufferService";
+
 
 // ---------------------------------------------------------------------------
 // Interface
@@ -95,9 +97,19 @@ export class CurrencyServiceRateProvider implements IRateProvider {
 
     try {
       const baseRate = resolveRate(sellCode, buyCode);
-      // Indicative prices include a small market spread (±0.1%)
+
+      // Apply exchange rate buffer for volatility protection
+      const buffered = await exchangeRateBufferService.applyBuffer(
+        baseRate,
+        "*",        // SEP-38 uses global wildcard provider
+        sellCode,
+        buyCode,
+        "sell",
+      );
+
+      // Indicative prices include a small market spread on top of the buffer
       const spread = 1 + (Math.random() - 0.5) * 0.002;
-      const price = (baseRate * spread).toFixed(PRICE_PRECISION);
+      const price = (buffered.bufferedRate * spread).toFixed(PRICE_PRECISION);
       return {
         price,
         fee_percent: this.feePercent.toFixed(2),
@@ -107,6 +119,7 @@ export class CurrencyServiceRateProvider implements IRateProvider {
       return null;
     }
   }
+
 
   async getFirmPrice(sellAsset: string, buyAsset: string): Promise<RateResult | null> {
     const sellCode = assetToCurrencyCode(sellAsset);
@@ -114,8 +127,18 @@ export class CurrencyServiceRateProvider implements IRateProvider {
     if (!sellCode || !buyCode) return null;
 
     try {
-      // Firm prices are locked — no random spread
-      const price = resolveRate(sellCode, buyCode).toFixed(PRICE_PRECISION);
+      const baseRate = resolveRate(sellCode, buyCode);
+
+      // Apply exchange rate buffer — firm prices are locked with the buffer
+      const buffered = await exchangeRateBufferService.applyBuffer(
+        baseRate,
+        "*",
+        sellCode,
+        buyCode,
+        "sell",
+      );
+
+      const price = buffered.bufferedRate.toFixed(PRICE_PRECISION);
       return {
         price,
         fee_percent: this.feePercent.toFixed(2),
@@ -125,6 +148,7 @@ export class CurrencyServiceRateProvider implements IRateProvider {
       return null;
     }
   }
+
 }
 
 // Singleton used by the router — can be replaced in tests

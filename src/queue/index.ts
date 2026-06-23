@@ -1,25 +1,20 @@
 import { rabbitMQManager } from "./rabbitmq";
 import { transactionQueue } from "./transactionQueue";
-import { closeWorker, transactionWorker } from "./worker";
-import {
-  providerBalanceAlertQueue,
-  closeProviderBalanceAlertQueue,
-  scheduleProviderBalanceAlertJob,
-} from "./providerBalanceAlertQueue";
-import {
-  closeProviderBalanceAlertWorker,
-  startProviderBalanceAlertWorker,
-} from "./providerBalanceAlertWorker";
-import { closeAccountMergeWorker } from "./accountMergeWorker";
+import { transactionWorker, closeWorker } from "./worker";
+import { syncQueue } from "./syncQueue";
+import { syncWorker, closeSyncWorker } from "./syncWorker";
+import { connection } from "./config";
+import { startProviderBalanceAlertWorker } from "./providerBalanceAlertWorker";
+import { scheduleProviderBalanceAlertJob } from "./providerBalanceAlertQueue";
+import { startAccountingTokenRefreshWorker, closeAccountingTokenRefreshWorker } from "./accountingTokenRefreshWorker";
 
 export async function shutdownQueue(): Promise<void> {
-  console.log("Shutting down queues...");
-  await closeProviderBalanceAlertWorker().catch(() => undefined);
-  await closeProviderBalanceAlertQueue().catch(() => undefined);
-  await closeAccountMergeWorker().catch(() => undefined);
-  await closeWorker().catch(() => undefined);
-  await transactionQueue.close().catch(() => undefined);
-  await rabbitMQManager.close().catch(() => undefined);
+  await Promise.all([
+    closeWorker().catch(() => undefined),
+    closeSyncWorker().catch(() => undefined),
+    transactionQueue.close().catch(() => undefined),
+    syncQueue.close().catch(() => undefined),
+  ]);
 }
 
 export {
@@ -37,6 +32,16 @@ export type {
   TransactionJobResult,
 } from "./transactionQueue";
 
+export {
+  syncQueue,
+  addSyncJob,
+  getSyncJobById,
+  getSyncQueueStats,
+} from "./syncQueue";
+export type { SyncJobData, SyncJobResult } from "./syncQueue";
+
+export { transactionWorker, closeWorker };
+export { syncWorker, closeSyncWorker };
 export { createQueueDashboard } from "./dashboard";
 export {
   getQueueHealth,
@@ -44,7 +49,7 @@ export {
   resumeQueueEndpoint,
 } from "./health";
 export {
-  getQueueDepth,
+  getQueueStatsAggregate,
   queueDepthHandler,
   queueDepthPrometheusHandler,
 } from "./queueDepthMetrics";
@@ -73,3 +78,11 @@ export {
   accountMergeWorker,
   closeAccountMergeWorker,
 } from "./accountMergeWorker";
+
+export {
+  startAccountingTokenRefreshWorker,
+  closeAccountingTokenRefreshWorker,
+};
+
+// Trace-ID propagation utilities
+export { withTraceId, traceIdFromJob, childLoggerWithTrace, TRACE_ID_KEY } from "./trace";

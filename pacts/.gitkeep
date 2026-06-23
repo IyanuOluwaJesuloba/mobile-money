@@ -1,0 +1,2 @@
+# Pact contract files are generated here when running: npm run test:pact
+# These JSON files document the API contracts between our service and providers.

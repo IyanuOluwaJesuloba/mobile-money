@@ -21,6 +21,7 @@ import {
   getNetworkPassphrase,
   getChannelAccountsConfig,
 } from "../../config/stellar";
+import { StellarService } from "./stellarService";
 
 // ============================================================================
 // Types
@@ -39,6 +40,8 @@ export interface PaymentOptions {
   amount: string;
   /** Optional memo */
   memo?: string;
+  /** Whether to use a fee-bump account to pay for network fees */
+  useFeeBump?: boolean;
 }
 
 export interface BatchPaymentResult {
@@ -143,10 +146,12 @@ export async function submitPayment(
         // Build the transaction using the channel account
         const channelAccount = new StellarSdk.Account(
           channelPublicKey,
-          (sequence - BigInt(1)).toString()
+          (sequence - BigInt(1)).toString(),
         );
 
-        const sourceKeypair = StellarSdk.Keypair.fromSecret(options.sourceSecret);
+        const sourceKeypair = StellarSdk.Keypair.fromSecret(
+          options.sourceSecret,
+        );
         const asset =
           options.asset === "native"
             ? StellarSdk.Asset.native()
@@ -164,7 +169,7 @@ export async function submitPayment(
             asset,
             amount: options.amount,
             source: options.sourceAccount,
-          })
+          }),
         );
 
         // Add memo if provided
@@ -178,15 +183,27 @@ export async function submitPayment(
         transaction.sign(channelKeypair);
         transaction.sign(sourceKeypair);
 
-        // Submit to network
+        // Check if fee bumping is requested
+        if (options.useFeeBump) {
+          const stellarService = new StellarService();
+          const response =
+            await stellarService.submitFeeBumpTransaction(transaction);
+          return {
+            hash: response.hash,
+            ledger: response.ledger,
+            fee: parseInt(response.successful ? StellarSdk.BASE_FEE : "0"),
+          };
+        }
+
+        // Submit to network directly
         const response = await server.submitTransaction(transaction);
 
         return {
           hash: response.hash,
           ledger: response.ledger,
-          fee: parseInt(response.successful ? '100' : '0'),
+          fee: parseInt(response.successful ? "100" : "0"),
         };
-      }
+      },
     );
 
     return {
@@ -209,9 +226,60 @@ export async function submitPayment(
  * This is the most efficient method for bulk payment processing
  */
 export async function submitBatchPayments(
-  payments: PaymentOptions[]
+  payments: PaymentOptions[],
+  options?: { dryRun?: boolean }
 ): Promise<BatchPaymentResult> {
   const startTime = Date.now();
+  const isDryRun = options?.dryRun === true;
+
+  if (isDryRun) {
+    const results = payments.map((payment, index) => {
+      let success = true;
+      let error: string | undefined;
+
+      try {
+        if (!payment.sourceAccount || !payment.destination || !payment.amount || !payment.sourceSecret) {
+          throw new Error("Missing required fields");
+        }
+
+        // Validate source secret and public keys
+        StellarSdk.Keypair.fromSecret(payment.sourceSecret);
+        StellarSdk.Keypair.fromPublicKey(payment.sourceAccount);
+        StellarSdk.Keypair.fromPublicKey(payment.destination);
+
+        // Validate asset if not native
+        if (payment.asset !== "native") {
+          if (!payment.asset.code || !payment.asset.issuer) {
+            throw new Error("Invalid custom asset configuration");
+          }
+          StellarSdk.Keypair.fromPublicKey(payment.asset.issuer);
+        }
+
+        // Validate amount
+        const amountNum = parseFloat(payment.amount);
+        if (isNaN(amountNum) || amountNum <= 0) {
+          throw new Error("Invalid amount");
+        }
+      } catch (err) {
+        success = false;
+        error = err instanceof Error ? err.message : String(err);
+      }
+
+      return {
+        index,
+        success,
+        hash: success ? `dry_run_${Date.now()}_${index}` : undefined,
+        error,
+      };
+    });
+
+    return {
+      successful: results.filter((r) => r.success).length,
+      failed: results.filter((r) => !r.success).length,
+      results,
+      totalTimeMs: Date.now() - startTime,
+    };
+  }
 
   if (!pool) {
     // Fallback to sequential submission
@@ -273,6 +341,17 @@ export async function submitBatchPayments(
         const transaction = builder.setTimeout(30).build();
         transaction.sign(channelKeypair);
         transaction.sign(sourceKeypair);
+
+        if (payment.useFeeBump) {
+          const stellarService = new StellarService();
+          const response =
+            await stellarService.submitFeeBumpTransaction(transaction);
+          return {
+            index,
+            hash: response.hash,
+            ledger: response.ledger,
+          };
+        }
 
         const response = await server.submitTransaction(transaction);
         return {
