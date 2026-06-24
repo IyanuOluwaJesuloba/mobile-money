@@ -1,3 +1,4 @@
+import logger from "../utils/logger";
 import { pool } from "../config/database";
 import axios from "axios";
 import { resolveToBaseAddress, isMuxedAddress } from "../stellar/muxed";
@@ -300,7 +301,7 @@ export class SanctionService {
       console.log(`Successfully synced ${entities.length} sanction entities.`);
     } catch (error) {
       await client.query("ROLLBACK");
-      console.error("Failed to update sanction list:", error);
+      logger.error("Failed to update sanction list:", error);
       throw error;
     } finally {
       client.release();

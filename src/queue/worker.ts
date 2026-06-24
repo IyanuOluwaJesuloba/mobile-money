@@ -173,7 +173,7 @@ async function sendTransactionPush(
       });
     }
   } catch (pushError) {
-    console.error(`[${transactionId}] Push notification failed:`, pushError);
+    logger.error(`[${transactionId}] Push notification failed:`, pushError);
   }
 }
 
@@ -537,7 +537,7 @@ async function processTransaction(
 
     // TODO: commented out because I couldn't find the job variable so to clear `rebase/merge` error
     // if (job) {
-    //   capturePersistentFailure(job).catch(err => console.error('[DLQ] Error capturing failure:', err));
+    //   capturePersistentFailure(job).catch(err => logger.error('[DLQ] Error capturing failure:', err));
     // }
   }
   // );
