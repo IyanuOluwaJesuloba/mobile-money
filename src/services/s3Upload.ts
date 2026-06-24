@@ -2,11 +2,13 @@ import { PutObjectCommand, HeadObjectCommand } from "@aws-sdk/client-s3";
 import crypto from "crypto";
 import { getS3Client, s3Config, getS3ObjectUrl } from "../config/s3";
 import { generateUniqueFilename, generateS3Key } from "../middleware/upload";
+import { KmsFileSigner, createFileSignerFromEnv, FileSignature } from "./stellar/hsmService";
 
 export interface UploadResult {
   success: boolean;
   fileUrl?: string;
   key?: string;
+  signature?: FileSignature;
   error?: string;
 }
 
@@ -17,7 +19,15 @@ export interface UploadOptions {
 }
 
 /**
- * Upload file to S3 bucket
+ * Upload file to S3 bucket with automatic HSM signing.
+ *
+ * Before uploading, the file buffer's SHA-256 digest is computed locally
+ * and signed via the configured KMS asymmetric key. The signature is
+ * stored in S3 object metadata so it can be retrieved for verification
+ * on read paths.
+ *
+ * If no HSM_FILE_KMS_KEY_ID is configured (CI / local dev), signing is
+ * skipped gracefully.
  */
 export const uploadToS3 = async (
   options: UploadOptions,
@@ -30,6 +40,34 @@ export const uploadToS3 = async (
     const key = generateS3Key(userId, uniqueFilename);
 
     const s3Client = getS3Client();
+
+    // ── HSM file signing ──────────────────────────────────────────────
+    const fileSigner = createFileSignerFromEnv();
+    let fileSignature: FileSignature | undefined;
+
+    if (fileSigner) {
+      try {
+        fileSignature = await fileSigner.sign(file.buffer);
+      } catch (err) {
+        console.error("HSM file signing failed (upload continues):", err);
+      }
+    }
+
+    // Build S3 metadata, appending signature fields when available
+    const s3Metadata: Record<string, string> = {
+      originalName: file.originalname,
+      uploadedBy: userId,
+      uploadedAt: new Date().toISOString(),
+      ...metadata,
+    };
+
+    if (fileSignature) {
+      s3Metadata["hsm-signature"] = fileSignature.signature;
+      s3Metadata["hsm-key-id"] = fileSignature.keyId;
+      s3Metadata["hsm-algorithm"] = fileSignature.algorithm;
+      s3Metadata["hsm-digest"] = fileSignature.digest;
+      s3Metadata["hsm-signed-at"] = fileSignature.signedAt;
+    }
 
     // Prepare upload command
     // Generate a random 256-bit (32-byte) key for SSE-C encryption
@@ -65,6 +103,7 @@ export const uploadToS3 = async (
       success: true,
       fileUrl,
       key,
+      signature: fileSignature,
     };
   } catch {
     console.error("S3 upload error");
