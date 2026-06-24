@@ -2300,16 +2300,20 @@ const validateComplianceCreate = (
   body: Record<string, unknown>,
 ): ValidationResult<ComplianceDocumentCreateInput> => {
   const title = normalizeString(body.title, "title", true);
-  if (!title.ok) return title as ValidationResult<ComplianceDocumentCreateInput>;
+  if (!title.ok)
+    return title as ValidationResult<ComplianceDocumentCreateInput>;
 
   const docBody = normalizeString(body.body, "body", true);
-  if (!docBody.ok) return docBody as ValidationResult<ComplianceDocumentCreateInput>;
+  if (!docBody.ok)
+    return docBody as ValidationResult<ComplianceDocumentCreateInput>;
 
   const summary = normalizeString(body.summary, "summary", false);
-  if (!summary.ok) return summary as ValidationResult<ComplianceDocumentCreateInput>;
+  if (!summary.ok)
+    return summary as ValidationResult<ComplianceDocumentCreateInput>;
 
   const provider = normalizeString(body.provider, "provider", false);
-  if (!provider.ok) return provider as ValidationResult<ComplianceDocumentCreateInput>;
+  if (!provider.ok)
+    return provider as ValidationResult<ComplianceDocumentCreateInput>;
   if (provider.value && provider.value.length > 100) {
     return { ok: false, message: "provider must be 100 characters or fewer" };
   }
@@ -2319,16 +2323,19 @@ const validateComplianceCreate = (
     "sourceUrl",
     false,
   );
-  if (!sourceUrl.ok) return sourceUrl as ValidationResult<ComplianceDocumentCreateInput>;
+  if (!sourceUrl.ok)
+    return sourceUrl as ValidationResult<ComplianceDocumentCreateInput>;
 
   const country = normalizeCountry(getCountryValue(body));
-  if (!country.ok) return country as ValidationResult<ComplianceDocumentCreateInput>;
+  if (!country.ok)
+    return country as ValidationResult<ComplianceDocumentCreateInput>;
 
   const tags = normalizeTags(body.tags);
   if (!tags.ok) return tags as ValidationResult<ComplianceDocumentCreateInput>;
 
   const status = normalizeStatus(body.status);
-  if (!status.ok) return status as ValidationResult<ComplianceDocumentCreateInput>;
+  if (!status.ok)
+    return status as ValidationResult<ComplianceDocumentCreateInput>;
 
   return {
     ok: true,
@@ -2369,25 +2376,29 @@ const validateComplianceUpdate = (
 
   if (Object.prototype.hasOwnProperty.call(body, "title")) {
     const title = normalizeString(body.title, "title", true);
-    if (!title.ok) return title as ValidationResult<ComplianceDocumentUpdateInput>;
+    if (!title.ok)
+      return title as ValidationResult<ComplianceDocumentUpdateInput>;
     input.title = title.value as string;
   }
 
   if (Object.prototype.hasOwnProperty.call(body, "body")) {
     const docBody = normalizeString(body.body, "body", true);
-    if (!docBody.ok) return docBody as ValidationResult<ComplianceDocumentUpdateInput>;
+    if (!docBody.ok)
+      return docBody as ValidationResult<ComplianceDocumentUpdateInput>;
     input.body = docBody.value as string;
   }
 
   if (Object.prototype.hasOwnProperty.call(body, "summary")) {
     const summary = normalizeString(body.summary, "summary", false);
-    if (!summary.ok) return summary as ValidationResult<ComplianceDocumentUpdateInput>;
+    if (!summary.ok)
+      return summary as ValidationResult<ComplianceDocumentUpdateInput>;
     input.summary = summary.value ?? null;
   }
 
   if (Object.prototype.hasOwnProperty.call(body, "provider")) {
     const provider = normalizeString(body.provider, "provider", false);
-    if (!provider.ok) return provider as ValidationResult<ComplianceDocumentUpdateInput>;
+    if (!provider.ok)
+      return provider as ValidationResult<ComplianceDocumentUpdateInput>;
     if (provider.value && provider.value.length > 100) {
       return { ok: false, message: "provider must be 100 characters or fewer" };
     }
@@ -2403,7 +2414,8 @@ const validateComplianceUpdate = (
       "sourceUrl",
       false,
     );
-    if (!sourceUrl.ok) return sourceUrl as ValidationResult<ComplianceDocumentUpdateInput>;
+    if (!sourceUrl.ok)
+      return sourceUrl as ValidationResult<ComplianceDocumentUpdateInput>;
     input.sourceUrl = sourceUrl.value ?? null;
   }
 
@@ -2413,19 +2425,22 @@ const validateComplianceUpdate = (
     Object.prototype.hasOwnProperty.call(body, "country_code")
   ) {
     const country = normalizeCountry(getCountryValue(body));
-    if (!country.ok) return country as ValidationResult<ComplianceDocumentUpdateInput>;
+    if (!country.ok)
+      return country as ValidationResult<ComplianceDocumentUpdateInput>;
     input.countryCode = country.value ?? null;
   }
 
   if (Object.prototype.hasOwnProperty.call(body, "tags")) {
     const tags = normalizeTags(body.tags);
-    if (!tags.ok) return tags as ValidationResult<ComplianceDocumentUpdateInput>;
+    if (!tags.ok)
+      return tags as ValidationResult<ComplianceDocumentUpdateInput>;
     input.tags = tags.value ?? [];
   }
 
   if (Object.prototype.hasOwnProperty.call(body, "status")) {
     const status = normalizeStatus(body.status);
-    if (!status.ok) return status as ValidationResult<ComplianceDocumentUpdateInput>;
+    if (!status.ok)
+      return status as ValidationResult<ComplianceDocumentUpdateInput>;
     input.status = status.value;
   }
 
@@ -2965,7 +2980,7 @@ router.get(
       console.error("Error fetching provider settings:", error);
       res.status(500).json({ message: "Failed to fetch provider settings" });
     }
-  }
+  },
 );
 
 router.put(
@@ -2976,22 +2991,69 @@ router.put(
     try {
       const providerName = req.params.providerName;
       const { failure_threshold, timeout_ms, fallback_order } = req.body;
-      
+
       const settings = await providerSettingsService.upsertProviderSettings(
         providerName,
         failure_threshold || 3,
         timeout_ms || 5000,
-        fallback_order || null
+        fallback_order || null,
       );
-      
+
       resetCircuitBreakerForProvider(providerName);
-      
+
       res.json({ message: "Provider settings updated successfully", settings });
     } catch (error) {
       console.error("Error updating provider settings:", error);
       res.status(500).json({ message: "Failed to update provider settings" });
     }
-  }
+  },
+);
+
+router.post(
+  "/provider-maintenance",
+  requireAdmin,
+  logAdminAction("CREATE_PROVIDER_MAINTENANCE_OUTAGE"),
+  async (req: Request, res: Response) => {
+    try {
+      const adminUser = (req as AuthRequest).user;
+      const {
+        provider_name,
+        providerName,
+        starts_at,
+        startsAt,
+        ends_at,
+        endsAt,
+        reason,
+        fallback_provider,
+        fallbackProvider,
+        notify_users,
+        notifyUsers,
+      } = req.body;
+
+      const outage = await providerSettingsService.createMaintenanceOutage({
+        providerName: providerName ?? provider_name,
+        startsAt: startsAt ?? starts_at,
+        endsAt: endsAt ?? ends_at,
+        reason: reason ?? null,
+        fallbackProvider: fallbackProvider ?? fallback_provider ?? null,
+        notifyUsers: notifyUsers ?? notify_users ?? true,
+        createdBy: adminUser?.id ?? null,
+      });
+
+      res.status(201).json({
+        message: "Provider maintenance outage scheduled",
+        outage,
+      });
+    } catch (error) {
+      console.error("Error scheduling provider maintenance outage:", error);
+      res.status(400).json({
+        message:
+          error instanceof Error
+            ? error.message
+            : "Failed to schedule provider maintenance outage",
+      });
+    }
+  },
 );
 
 /**
@@ -3118,7 +3180,10 @@ router.get(
       });
     } catch (error) {
       console.error("[Dashboard] Failed to fetch stats:", error);
-      throw createError(ERROR_CODES.INTERNAL_ERROR, "Failed to fetch dashboard stats");
+      throw createError(
+        ERROR_CODES.INTERNAL_ERROR,
+        "Failed to fetch dashboard stats",
+      );
     }
   },
 );
@@ -3188,7 +3253,10 @@ router.get(
       });
     } catch (error) {
       console.error("[Queue] Stats fetch failed:", error);
-      throw createError(ERROR_CODES.INTERNAL_ERROR, "Failed to fetch queue stats");
+      throw createError(
+        ERROR_CODES.INTERNAL_ERROR,
+        "Failed to fetch queue stats",
+      );
     }
   },
 );
