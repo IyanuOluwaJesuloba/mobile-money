@@ -328,7 +328,7 @@ export class ComplianceController {
   /**
    * Main verification handler checking compliance for payments.
    */
-  validateComplianceStatus = async (req: Request, res: Response): Promise<Response> => {
+  async validateComplianceStatus(req: Request, res: Response): Promise<Response> {
     try {
       const parsed = VerifyComplianceRequestSchema.safeParse(req.body);
       if (!parsed.success) {
@@ -400,5 +400,5 @@ export class ComplianceController {
       console.error("[ComplianceController] Error:", err.message);
       return res.status(500).json({ error: "Internal server error during compliance checks" });
     }
-  };
+  }
 }
