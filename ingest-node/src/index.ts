@@ -31,6 +31,7 @@ import { z } from "zod";
 import Redis from "ioredis";
 import { connect as natsConnect, StringCodec, type NatsConnection } from "nats";
 import { Registry, Counter, Histogram, collectDefaultMetrics } from "prom-client";
+import fastifyRateLimit from "@fastify/rate-limit";
 
 // ---------------------------------------------------------------------------
 // Config
@@ -383,6 +384,7 @@ const app = Fastify({
   logger: false,          // disable for benchmark — logging adds latency
   trustProxy: true,
 });
+app.register(fastifyRateLimit, { max: 100, timeWindow: 60000 });
 
 app.post<{ Body: unknown }>("/ingest", async (req, reply) => {
   const requestStart = process.hrtime.bigint();
