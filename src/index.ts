@@ -1,3 +1,4 @@
+import logger from "./utils/logger";
 // Initialize centralized configuration first
 import "./config/init";
 
@@ -28,6 +29,7 @@ import {
   vaultRoutesV1,
 } from "./routes/v1";
 import { transactionRoutes } from "./routes/transactions";
+import { initializeEscrowEventProcessing } from "./services/stellar/stellarService";
 import { authRoutes } from "./routes/auth";
 import { bulkRoutes } from "./routes/bulk";
 import { transactionDisputeRoutes, disputeRoutes } from "./routes/disputes";
@@ -68,6 +70,7 @@ import { privacyRoutes } from "./routes/privacy";
 import { developerDashboardRoutes } from "./routes/developerDashboard";
 import { travelRuleRoutes } from "./routes/travelRule";
 import mtnCallbacksRouter from "./routes/mtnCallbacks";
+import orangeMadagascarCallbacksRouter from "./routes/orangeMadagascarCallbacks";
 import sep31Router from "./stellar/sep31";
 import sep24Router from "./stellar/sep24";
 import sep38Router from "./stellar/sep38";
@@ -89,6 +92,7 @@ import { paymentLinkRoutes } from "./routes/paymentLinkRoutes.js";
 import providerStatusRouter from "./routes/providerStatus";
 import { startHeartbeatService, stopHeartbeatService } from "./services/heartbeatService";
 import { startStellarExporter } from "./services/stellarExporter";
+import { StellarService } from "./services/stellar/stellarService";
 
 // Sentry Middleware
 import { initSentry, sentryBreadcrumbMiddleware } from "./middleware/sentry";
@@ -247,7 +251,7 @@ app.get("/ready", async (_req: Request, res: Response) => {
     await pool.query("SELECT 1");
     checks.database = "ok";
   } catch (err) {
-    console.error("Database check failed", err);
+    logger.error("Database check failed", err);
     allReady = false;
   }
 
@@ -260,7 +264,7 @@ app.get("/ready", async (_req: Request, res: Response) => {
       allReady = false;
     }
   } catch (err) {
-    console.error("Redis check failed", err);
+    logger.error("Redis check failed", err);
     allReady = false;
   }
 
@@ -372,6 +376,7 @@ app.use("/api/disputes", disputeRoutes);
 app.use("/api/stats", statsRoutes);
 app.use("/api/contacts", contactsRoutes);
 app.use("/api/mtn", mtnCallbacksRouter);
+app.use("/api/orange-madagascar", orangeMadagascarCallbacksRouter);
 app.use("/api/reports", reportsRoutes);
 app.use("/api/fees", feesRoutes);
 app.use("/api/users", userRoutes);
@@ -516,7 +521,7 @@ async function gracefulShutdown(signal: NodeJS.Signals): Promise<void> {
     console.log("[Shutdown] Graceful shutdown complete");
     process.exit(0);
   } catch (error) {
-    console.error("[Shutdown] Shutdown sequence failed", error);
+    logger.error("[Shutdown] Shutdown sequence failed", error);
     process.exit(1);
   }
 }
@@ -542,6 +547,16 @@ async function initializeRuntime(): Promise<void> {
 
   // Initialize Prometheus Horizon Scraper
   startStellarExporter();
+
+  // Verify Horizon reachability before starting runtime workers
+  try {
+    const stellarService = new StellarService();
+    await stellarService.pingHorizon();
+    console.log("Horizon server reachable");
+  } catch (err) {
+    console.error("Horizon unreachable during startup. Halting startup.", err);
+    process.exit(1);
+  }
 
   // Initialize System Heartbeat Metric
   startHeartbeatService();
@@ -572,13 +587,15 @@ async function initializeRuntime(): Promise<void> {
       startProviderBalanceAlertWorker,
       scheduleProviderBalanceAlertJob,
       startAccountingTokenRefreshWorker,
+      startWebhookRetryWorker,
     } = await import("./queue/index.js");
     startProviderBalanceAlertWorker();
     startAccountingTokenRefreshWorker();
+    startWebhookRetryWorker();
     await scheduleProviderBalanceAlertJob();
     console.log("Provider balance alert queue initialized");
   } catch (err) {
-    console.error("Redis failed", err);
+    logger.error("Redis failed", err);
     console.warn("Distributed locks not available");
   }
 
@@ -615,6 +632,7 @@ async function initializeRuntime(): Promise<void> {
 
 if (process.env.NODE_ENV !== "test") {
   void initializeRuntime();
+  initializeEscrowEventProcessing();
 }
 
 export default app;
