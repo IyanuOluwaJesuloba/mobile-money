@@ -120,8 +120,8 @@ function checkCertificate(domain: string, timeoutMs = 10_000): Promise<CertResul
         const msRemaining = expiresAt.getTime() - now.getTime();
         const daysRemaining = Math.floor(msRemaining / (1000 * 60 * 60 * 24));
 
-        const issuerOrg = cert.issuer
-          ? cert.issuer.O || cert.issuer.CN || JSON.stringify(cert.issuer)
+        const issuerOrg: string = cert.issuer
+          ? String(cert.issuer.O || cert.issuer.CN || JSON.stringify(cert.issuer))
           : "Unknown";
 
         socket.destroy();

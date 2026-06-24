@@ -1,7 +1,14 @@
 import { Pool, QueryConfig, QueryResult, QueryResultRow, PoolClient } from "pg";
+import { auditService } from "../services/auditlogService";
 import { isReadOnlyQuery } from "../utils/readOnlyDetector";
+import { dbReplicaLagSeconds, dbReplicaReadEnabled } from "../utils/metrics";
 import { IS_SANDBOX, SANDBOX_DATABASE_URL, DATABASE_URL } from "./env";
 
+const DR_DATABASE_URL = process.env.DR_DATABASE_URL;
+const isDRMode = (): boolean => !!DR_DATABASE_URL;
+
+const productionSsl =
+  process.env.NODE_ENV === "production" ? { rejectUnauthorized: true } : undefined;
 
 // Configuration for slow query logging
 const SLOW_QUERY_THRESHOLD_MS = parseInt(
@@ -133,11 +140,12 @@ class SlowQueryPool extends Pool {
  * (INSERT, UPDATE, DELETE) and read operations when no replica is available.
  */
 export const pool = new Pool({
-    connectionString: IS_SANDBOX ? (SANDBOX_DATABASE_URL || DATABASE_URL) : DATABASE_URL,
-    max: 1000,
-    idleTimeoutMillis: 30000,
-    connectionTimeoutMillis: 500,
-  });
+  connectionString: IS_SANDBOX ? (SANDBOX_DATABASE_URL || DATABASE_URL) : DATABASE_URL,
+  max: 1000,
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 500,
+  ssl: productionSsl,
+});
 
 // Wrap query for slow-query logging while preserving Pool typings.
 const originalPoolQuery = pool.query.bind(pool);
@@ -161,6 +169,37 @@ const originalPoolQuery = pool.query.bind(pool);
     if (durationMs > SLOW_QUERY_THRESHOLD_MS) {
       logSlowQuery(queryString, durationMs, queryParams);
     }
+
+    // PII Audit Interceptor
+    if (queryString.toUpperCase().includes("FROM USERS") || queryString.toUpperCase().includes("UPDATE USERS")) {
+      const isSelect = queryString.toUpperCase().startsWith("SELECT");
+      const isUpdate = queryString.toUpperCase().startsWith("UPDATE");
+
+      if (isSelect || isUpdate) {
+        // Attempt to extract targetId from query or params
+        let targetId = "unknown";
+        if (queryParams && queryParams.length > 0) {
+          // Typically the first or last param in findById or UPDATE ... WHERE id = $X
+          targetId = queryParams[queryParams.length - 1]; 
+        }
+
+        // Trigger asynchronous audit logging
+        // Note: Real admin context would be passed here in a production environment via AsyncLocalStorage or similar.
+        // For this task, we log the access attempt to ensure visibility.
+        setImmediate(() => {
+          auditService.logPIIAccess({
+            adminId: "system-admin", // Placeholder for actual admin context extraction
+            targetId: String(targetId),
+            resource: "users",
+            metadata: {
+              query: sanitizeQuery(queryString),
+              isUpdate,
+            }
+          }).catch(err => console.error("[PII Audit Interceptor] Failed:", err));
+        });
+      }
+    }
+
     return result;
   } catch (error) {
     const endTime = process.hrtime.bigint();
@@ -183,30 +222,108 @@ const replicaUrls: string[] = process.env.READ_REPLICA_URL
   ? process.env.READ_REPLICA_URL.split(",").map((url) => url.trim())
   : [];
 
+const REPLICA_SYNC_LAG_THRESHOLD_SECONDS = (() => {
+  const threshold = parseFloat(process.env.REPLICA_SYNC_LAG_THRESHOLD_SECONDS || "5");
+  return Number.isFinite(threshold) ? threshold : 5;
+})();
+const REPLICA_LAG_MONITOR_INTERVAL_MS = (() => {
+  const interval = parseInt(process.env.REPLICA_LAG_MONITOR_INTERVAL_MS || "10000", 10);
+  return Number.isFinite(interval) && interval > 0 ? interval : 10000;
+})();
+
+type ReplicaStatus = {
+  url: string;
+  enabled: boolean;
+  healthy: boolean;
+  lagSeconds: number | null;
+};
+
+const replicaStatuses: ReplicaStatus[] = replicaUrls.map((url) => ({
+  url,
+  enabled: true,
+  healthy: true,
+  lagSeconds: null,
+}));
+
 // Build an individual Pool for each replica URL
-  const replicaPools: Pool[] = replicaUrls.map(
-    (url) =>
-      new Pool({
-        connectionString: url,
-        max: 50,
-        idleTimeoutMillis: 30000,
-        connectionTimeoutMillis: 500,
-      }),
-  );
+const replicaPools: Pool[] = replicaUrls.map(
+  (url) =>
+    new Pool({
+      connectionString: url,
+      max: 50,
+      idleTimeoutMillis: 30000,
+      connectionTimeoutMillis: 500,
+      ssl: productionSsl,
+    }),
+);
 
 // Track which replica to use next for round-robin load balancing
 let replicaIndex = 0;
+
+function getActiveReplicaIndices(): number[] {
+  return replicaStatuses
+    .map((status, idx) => ({ status, idx }))
+    .filter(({ status }) => status.enabled && status.healthy)
+    .map(({ idx }) => idx);
+}
 
 /**
  * Return the next replica pool in round-robin order.
  * Returns null if no replica pools are configured.
  */
 function getNextReplicaPool(): Pool | null {
-  if (replicaPools.length === 0) return null;
-  const selected = replicaPools[replicaIndex % replicaPools.length];
+  const activeIndices = getActiveReplicaIndices();
+  if (activeIndices.length === 0) return null;
+  const selectedIndex = activeIndices[replicaIndex % activeIndices.length];
   replicaIndex += 1;
-  return selected;
+  return replicaPools[selectedIndex];
 }
+
+async function refreshReplicaStatus(idx: number): Promise<void> {
+  const url = replicaUrls[idx];
+  let healthy = false;
+  let lagSeconds: number | null = null;
+  let client: PoolClient | null = null;
+
+  try {
+    client = await replicaPools[idx].connect();
+    const query = `
+      SELECT CASE
+        WHEN pg_is_in_recovery() THEN EXTRACT(EPOCH FROM (now() - pg_last_xact_replay_timestamp()))
+        ELSE 0
+      END AS lag_seconds
+    `;
+    const result = await client.query<{ lag_seconds: number | null }>(query);
+    lagSeconds = result.rows?.[0]?.lag_seconds ?? null;
+    healthy = true;
+  } catch (error) {
+    healthy = false;
+    lagSeconds = null;
+    console.warn(`Replica health check failed for ${url}:`, error);
+  } finally {
+    client?.release();
+  }
+
+  const enabled = healthy && lagSeconds !== null && lagSeconds <= REPLICA_SYNC_LAG_THRESHOLD_SECONDS;
+  replicaStatuses[idx] = { url, enabled, healthy, lagSeconds };
+
+  dbReplicaLagSeconds.labels(url).set(lagSeconds ?? 0);
+  dbReplicaReadEnabled.labels(url).set(enabled ? 1 : 0);
+}
+
+async function refreshAllReplicaStatuses(): Promise<void> {
+  await Promise.all(replicaUrls.map((_, idx) => refreshReplicaStatus(idx)));
+}
+
+function startReplicaLagMonitor(): void {
+  if (replicaUrls.length === 0) return;
+  void refreshAllReplicaStatuses();
+  setInterval(() => {
+    void refreshAllReplicaStatuses();
+  }, REPLICA_LAG_MONITOR_INTERVAL_MS);
+}
+
+startReplicaLagMonitor();
 
 /**
  * Execute a read-only SQL query against a replica pool if available.
@@ -259,20 +376,33 @@ export async function queryWrite<T extends import("pg").QueryResultRow = any>(
  * Returns an array of status objects – useful for monitoring endpoints.
  */
 export async function checkReplicaHealth(): Promise<
-  { url: string; healthy: boolean }[]
+  { url: string; healthy: boolean; enabled: boolean; lagSeconds: number | null }[]
 > {
   return Promise.all(
     replicaUrls.map(async (url, idx) => {
       let client: PoolClient | null = null;
+      let healthy = false;
+      let lagSeconds: number | null = null;
+
       try {
         client = await replicaPools[idx].connect();
-        await client.query("SELECT 1");
-        return { url, healthy: true };
+        const query = `
+          SELECT CASE
+            WHEN pg_is_in_recovery() THEN EXTRACT(EPOCH FROM (now() - pg_last_xact_replay_timestamp()))
+            ELSE 0
+          END AS lag_seconds
+        `;
+        const result = await client.query<{ lag_seconds: number | null }>(query);
+        lagSeconds = result.rows?.[0]?.lag_seconds ?? null;
+        healthy = true;
       } catch {
-        return { url, healthy: false };
+        healthy = false;
       } finally {
         client?.release();
       }
+
+      const enabled = healthy && lagSeconds !== null && lagSeconds <= REPLICA_SYNC_LAG_THRESHOLD_SECONDS;
+      return { url, healthy, enabled, lagSeconds };
     }),
   );
 }
