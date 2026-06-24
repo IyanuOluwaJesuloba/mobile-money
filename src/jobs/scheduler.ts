@@ -13,6 +13,7 @@ import { runProviderBalanceAlertJob } from "./balances";
 import { runProviderHealthCheckJob } from "./providerHealthCheck";
 import { runKycTierUpgradeJob } from "./kycTierUpgradeJob";
 import { runLiquidityRebalanceJob } from "./liquidityRebalanceJob";
+import { runSanctionSyncJob } from "./sanctionSyncJob";
 
 interface JobConfig {
   name: string;
@@ -86,6 +87,12 @@ const JOBS: JobConfig[] = [
     // Every 15 minutes - auto-transfers between providers when one runs low
     schedule: process.env.LIQUIDITY_REBALANCE_CRON || "*/15 * * * *",
     handler: runLiquidityRebalanceJob,
+  },
+  {
+    name: "sanction-sync",
+    // Daily at 1:00 AM - streams and indexes sanctions list updates, clears match cache
+    schedule: process.env.SANCTION_SYNC_CRON || "0 1 * * *",
+    handler: runSanctionSyncJob,
   },
 ];
 

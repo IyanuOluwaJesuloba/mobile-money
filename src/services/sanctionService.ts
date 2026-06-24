@@ -1,5 +1,7 @@
 import { pool } from "../config/database";
+import { invalidatePattern } from "./cache";
 import axios from "axios";
+import { createGunzip } from "zlib";
 
 export interface SanctionEntity {
   name: string;
@@ -95,6 +97,99 @@ export class SanctionService {
     }
     
     return matches.sort((a, b) => b.score - a.score);
+  }
+
+  /**
+   * Streams a (optionally gzip-compressed) NDJSON sanctions feed from a URL,
+   * yielding parsed SanctionEntity arrays in chunks of `batchSize`.
+   * Handles large files without loading the entire payload into memory.
+   */
+  async *streamSanctionUpdates(
+    url: string,
+    batchSize = 500,
+  ): AsyncGenerator<SanctionEntity[]> {
+    const response = await axios.get<NodeJS.ReadableStream>(url, {
+      responseType: "stream",
+      decompress: false, // we handle decompression ourselves
+    });
+
+    const contentEncoding = (response.headers["content-encoding"] ?? "").toLowerCase();
+    const rawStream: NodeJS.ReadableStream = response.data;
+    const dataStream = contentEncoding === "gzip" ? rawStream.pipe(createGunzip()) : rawStream;
+
+    let batch: SanctionEntity[] = [];
+    let lineBuffer = "";
+
+    for await (const chunk of dataStream as AsyncIterable<Buffer>) {
+      lineBuffer += chunk.toString("utf8");
+      const lines = lineBuffer.split("\n");
+      lineBuffer = lines.pop() ?? "";
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        try {
+          const entity: SanctionEntity = JSON.parse(trimmed);
+          batch.push(entity);
+          if (batch.length >= batchSize) {
+            yield batch;
+            batch = [];
+          }
+        } catch {
+          // skip malformed lines
+        }
+      }
+    }
+
+    // flush remaining buffered line
+    if (lineBuffer.trim()) {
+      try {
+        const entity: SanctionEntity = JSON.parse(lineBuffer.trim());
+        batch.push(entity);
+      } catch {
+        // ignore
+      }
+    }
+
+    if (batch.length > 0) yield batch;
+  }
+
+  /**
+   * Batch-upserts a single chunk of entities in one transaction.
+   * Keeps per-batch memory bounded.
+   */
+  async updateSanctionListBatch(entities: SanctionEntity[]): Promise<void> {
+    if (entities.length === 0) return;
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      for (const entity of entities) {
+        await client.query(
+          `INSERT INTO sanction_list (name, country, source, category, external_id)
+           VALUES ($1, $2, $3, $4, $5)
+           ON CONFLICT (external_id, source) DO UPDATE SET
+             name = EXCLUDED.name,
+             country = EXCLUDED.country,
+             category = EXCLUDED.category,
+             updated_at = CURRENT_TIMESTAMP`,
+          [entity.name, entity.country ?? null, entity.source, entity.category ?? null, entity.external_id ?? null],
+        );
+      }
+      await client.query("COMMIT");
+    } catch (err) {
+      await client.query("ROLLBACK");
+      throw err;
+    } finally {
+      client.release();
+    }
+  }
+
+  /**
+   * Invalidates all cached sanction-match results so the next lookup
+   * uses the freshly indexed data.
+   */
+  async clearSanctionMatchCache(): Promise<void> {
+    await invalidatePattern("cache:/api/sanctions*");
   }
 
   /**
