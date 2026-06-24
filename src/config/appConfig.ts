@@ -114,6 +114,46 @@ export const configSchema = convict({
         env: "ORANGE_MAX_AMOUNT",
       },
     },
+    orangeMadagascar: {
+      minAmount: {
+        doc: "Minimum transaction amount for Orange Madagascar (MGA)",
+        format: "nat",
+        default: 100,
+        env: "ORANGE_MADAGASCAR_MIN_AMOUNT",
+      },
+      maxAmount: {
+        doc: "Maximum transaction amount for Orange Madagascar (MGA)",
+        format: "nat",
+        default: 5000000,
+        env: "ORANGE_MADAGASCAR_MAX_AMOUNT",
+      },
+      callbackSecret: {
+        doc: "Orange Madagascar callback HMAC secret for verifying incoming callbacks",
+        format: String,
+        default: "",
+        env: "ORANGE_MADAGASCAR_CALLBACK_SECRET",
+      },
+      callbackSignatureHeader: {
+        doc: "Header used by Orange Madagascar for callback signature verification",
+        format: String,
+        default: "X-Callback-Signature",
+        env: "ORANGE_MADAGASCAR_CALLBACK_SIGNATURE_HEADER",
+      },
+    },
+    smsPortal: {
+      minAmount: {
+        doc: "Minimum transaction amount for SMS Portal (various currencies)",
+        format: "nat",
+        default: 100,
+        env: "SMS_PORTAL_MIN_AMOUNT",
+      },
+      maxAmount: {
+        doc: "Maximum transaction amount for SMS Portal (various currencies)",
+        format: "nat",
+        default: 5000000,
+        env: "SMS_PORTAL_MAX_AMOUNT",
+      },
+    },
   },
 
   // Transaction Limits by KYC Level
@@ -250,14 +290,16 @@ export const configSchema = convict({
   // Mobile Money Provider Health Checks
   healthCheck: {
     failureThreshold: {
-      doc: "Number of failures before opening circuit breaker",
+      doc: "Number of consecutive failures before opening the health-check circuit breaker",
       format: "nat",
       default: 3,
+      env: "PROVIDER_HEALTH_FAILURE_THRESHOLD",
     },
     openDurationMs: {
-      doc: "Duration to keep circuit breaker open in milliseconds",
+      doc: "Duration (ms) to keep the health-check circuit breaker open before allowing a retry",
       format: "nat",
       default: 60000, // 1 minute
+      env: "PROVIDER_HEALTH_OPEN_DURATION_MS",
     },
   },
 

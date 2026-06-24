@@ -10,6 +10,7 @@ import {
 import { ERROR_CODES } from "../constants/errorCodes";
 import { createError } from "../middleware/errorHandler";
 import { enqueueSepWebhook } from "../services/stellar/webhooks";
+import { generateSignedSep24Url, verifySep24Signature } from "../utils/sep24Signature";
 
 function isValidStellarPublicKey(key: string): boolean {
   try {
@@ -121,6 +122,10 @@ export interface InteractiveFlowResponse {
 
 const transactions = new Map<string, Sep24Transaction>();
 
+// Token limits: max active interactive transactions per account
+const MAX_ACTIVE_TRANSACTIONS_PER_ACCOUNT = 5;
+const activeTransactionsPerAccount = new Map<string, number>();
+
 // ============================================================================
 // Configuration
 // ============================================================================
@@ -183,6 +188,14 @@ export const generateInteractiveUrl = async (
   const config = getSep24Config();
   const transactionId = uuidv4();
 
+  // Enforce token limits: reject if account already has too many active transactions
+  const currentCount = activeTransactionsPerAccount.get(request.account) || 0;
+  if (currentCount >= MAX_ACTIVE_TRANSACTIONS_PER_ACCOUNT) {
+    throw new Error(
+      `Too many active interactive transactions for account. Limit is ${MAX_ACTIVE_TRANSACTIONS_PER_ACCOUNT}.`,
+    );
+  }
+
   const transaction: Sep24Transaction = {
     id: transactionId,
     kind,
@@ -196,6 +209,7 @@ export const generateInteractiveUrl = async (
   };
 
   transactions.set(transactionId, transaction);
+  activeTransactionsPerAccount.set(request.account, currentCount + 1);
 
   const params = new URLSearchParams({
     transaction_id: transactionId,
@@ -220,10 +234,20 @@ export const generateInteractiveUrl = async (
       ? config.interactiveUrlBase
       : config.interactiveUrlBase.replace("deposit", "withdraw");
 
-  return {
-    url: `${baseUrl}?${params.toString()}`,
-    id: transactionId,
-  };
+  try {
+    // Sign the interactive URL with HMAC-SHA256 for query hash validation
+    const signedUrl = generateSignedSep24Url(baseUrl, Object.fromEntries(params));
+
+    return {
+      url: signedUrl,
+      id: transactionId,
+    };
+  } catch (error) {
+    // Clean up on failure to sign URL
+    transactions.delete(transactionId);
+    decrementActiveTransactionCount(request.account);
+    throw error;
+  }
 };
 
 export const initiateDeposit = async (
@@ -287,6 +311,13 @@ export const initiateWithdrawal = async (
 export const getTransaction = (id: string): Sep24Transaction | undefined =>
   transactions.get(id);
 
+function decrementActiveTransactionCount(account: string): void {
+  const current = activeTransactionsPerAccount.get(account) || 0;
+  if (current > 0) {
+    activeTransactionsPerAccount.set(account, current - 1);
+  }
+}
+
 export const updateTransactionStatus = (
   id: string,
   status: Sep24TransactionStatus,
@@ -303,6 +334,11 @@ export const updateTransactionStatus = (
     transaction.completed_at = new Date().toISOString();
 
   transactions.set(id, transaction);
+
+  // Decrement active count when transaction reaches terminal state
+  if (["completed", "failed", "expired"].includes(status)) {
+    decrementActiveTransactionCount(transaction.account);
+  }
 
   if (statusChanged && transaction.callback) {
     enqueueSepWebhook(transaction.id, status, transaction.callback, transaction).catch((err) =>
@@ -350,6 +386,7 @@ export const processCallback = async (
 
   if (["completed", "failed", "expired"].includes(status)) {
     transaction.completed_at = new Date().toISOString();
+    decrementActiveTransactionCount(transaction.account);
   }
 
   transactions.set(transaction_id, transaction);
@@ -484,6 +521,39 @@ sep24Router.put("/transaction/:id", async (req: Request, res: Response) => {
     });
   }
   res.json(transaction);
+});
+
+// GET callback with SEP-24 query hash validation
+sep24Router.get("/callback/:id", verifySep24Signature, async (req: Request, res: Response) => {
+  try {
+    const { status, message } = req.query;
+    const callbackData: CallbackData = {
+      transaction_id: req.params.id,
+      status: status as Sep24TransactionStatus,
+      message: message as string | undefined,
+    };
+    const transaction = await processCallback(callbackData);
+    if (!transaction) {
+      throw createError(ERROR_CODES.NOT_FOUND, "Not found", {
+        error: "Not found",
+      });
+    }
+
+    const baseUrl = `${req.protocol}://${req.get("host")}`;
+    let redirectUrl = null;
+    if (transaction.status === "completed")
+      redirectUrl = `${baseUrl}/sep24/success?id=${req.params.id}`;
+    if (["failed", "expired"].includes(transaction.status))
+      redirectUrl = `${baseUrl}/sep24/failure?id=${req.params.id}`;
+
+    res.json({
+      success: true,
+      transaction,
+      ...(redirectUrl && { redirect: redirectUrl }),
+    });
+  } catch (_error) {
+    throw createError(ERROR_CODES.INTERNAL_ERROR, "Failed to process callback");
+  }
 });
 
 sep24Router.post("/callback/:id", async (req: Request, res: Response) => {

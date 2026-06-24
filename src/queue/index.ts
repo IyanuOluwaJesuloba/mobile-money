@@ -9,6 +9,7 @@ import { connection } from "./config";
 import { startProviderBalanceAlertWorker } from "./providerBalanceAlertWorker";
 import { scheduleProviderBalanceAlertJob } from "./providerBalanceAlertQueue";
 import { startAccountingTokenRefreshWorker, closeAccountingTokenRefreshWorker } from "./accountingTokenRefreshWorker";
+import { startWebhookRetryWorker, closeWebhookRetryWorker } from "./webhookRetryWorker";
 
 export async function shutdownQueue(): Promise<void> {
   await Promise.all([
@@ -17,7 +18,7 @@ export async function shutdownQueue(): Promise<void> {
     closeAccountingRetryWorker().catch(() => undefined),
     transactionQueue.close().catch(() => undefined),
     syncQueue.close().catch(() => undefined),
-    accountingRetryQueue.close().catch(() => undefined),
+    closeWebhookRetryWorker().catch(() => undefined),
   ]);
 }
 
@@ -105,6 +106,11 @@ export {
   startAccountingTokenRefreshWorker,
   closeAccountingTokenRefreshWorker,
 };
+
+export {
+  startWebhookRetryWorker,
+  closeWebhookRetryWorker,
+} from "./webhookRetryWorker";
 
 // Trace-ID propagation utilities
 export { withTraceId, traceIdFromJob, childLoggerWithTrace, TRACE_ID_KEY } from "./trace";

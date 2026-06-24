@@ -68,6 +68,7 @@ import { privacyRoutes } from "./routes/privacy";
 import { developerDashboardRoutes } from "./routes/developerDashboard";
 import { travelRuleRoutes } from "./routes/travelRule";
 import mtnCallbacksRouter from "./routes/mtnCallbacks";
+import orangeMadagascarCallbacksRouter from "./routes/orangeMadagascarCallbacks";
 import sep31Router from "./stellar/sep31";
 import sep24Router from "./stellar/sep24";
 import sep38Router from "./stellar/sep38";
@@ -372,6 +373,7 @@ app.use("/api/disputes", disputeRoutes);
 app.use("/api/stats", statsRoutes);
 app.use("/api/contacts", contactsRoutes);
 app.use("/api/mtn", mtnCallbacksRouter);
+app.use("/api/orange-madagascar", orangeMadagascarCallbacksRouter);
 app.use("/api/reports", reportsRoutes);
 app.use("/api/fees", feesRoutes);
 app.use("/api/users", userRoutes);
@@ -572,9 +574,11 @@ async function initializeRuntime(): Promise<void> {
       startProviderBalanceAlertWorker,
       scheduleProviderBalanceAlertJob,
       startAccountingTokenRefreshWorker,
+      startWebhookRetryWorker,
     } = await import("./queue/index.js");
     startProviderBalanceAlertWorker();
     startAccountingTokenRefreshWorker();
+    startWebhookRetryWorker();
     await scheduleProviderBalanceAlertJob();
     console.log("Provider balance alert queue initialized");
   } catch (err) {
