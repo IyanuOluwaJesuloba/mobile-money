@@ -42,7 +42,11 @@ export const verifyWebhookSignature = (
     .digest("hex");
 
   try {
-    const sigBuf = Buffer.from(signatureHeader, "utf8");
+    const rawSig = signatureHeader.startsWith("sha256=")
+      ? signatureHeader.substring(7)
+      : signatureHeader;
+
+    const sigBuf = Buffer.from(rawSig, "utf8");
     const expectedBuf = Buffer.from(expected, "utf8");
     if (
       sigBuf.length === expectedBuf.length &&
