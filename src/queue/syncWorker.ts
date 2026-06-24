@@ -36,14 +36,22 @@ async function logAccountingSyncError(
 /**
  * Sync Queue Processor Function
  * Handles the execution logic for a sync job, distinguishing transient and permanent errors.
+ * On permanent failure after max retries, moves job to accounting retry queue for manual/scheduled retry.
  */
 export async function processSyncJob(
   job: Job<SyncJobData, SyncJobResult>,
 ): Promise<SyncJobResult> {
   const { syncId, transactionId, platform, payload } = job.data;
 
-  console.log(
-    `[SyncWorker] [Job ${job.id}] Processing accounting sync for transaction ${transactionId} to ${platform}. Attempt #${job.attemptsMade + 1}`,
+  logger.info(
+    {
+      jobId: job.id,
+      syncId,
+      transactionId,
+      platform,
+      attempt: job.attemptsMade + 1,
+    },
+    "Processing accounting sync operation",
   );
 
   try {
@@ -55,34 +63,106 @@ export async function processSyncJob(
       throw new ValidationError(`Unsupported accounting platform: ${platform}`);
     }
 
-    console.log(
-      `[SyncWorker] [Job ${job.id}] Successfully synced transaction ${transactionId} to ${platform}.`,
+    logger.info(
+      {
+        jobId: job.id,
+        syncId,
+        transactionId,
+        platform,
+      },
+      "Successfully synced transaction to accounting platform",
     );
+
     return { success: true, syncId, platform };
   } catch (error: unknown) {
     const isTransient =
       error instanceof RateLimitError || error instanceof NetworkError;
     const message = error instanceof Error ? error.message : String(error);
+    const maxAttempts = job.opts.attempts || 5;
+    const isLastAttempt = job.attemptsMade + 1 >= maxAttempts;
 
     if (isTransient) {
       // Log transient failure. BullMQ will automatically reschedule with exponential backoff.
-      console.warn(
-        `[SyncWorker] [Job ${job.id}] Transient error encountered during ${platform} sync (Attempt #${job.attemptsMade + 1}): ${message}. Scheduling retry...`,
+      logger.warn(
+        {
+          jobId: job.id,
+          syncId,
+          transactionId,
+          platform,
+          attempt: job.attemptsMade + 1,
+          maxAttempts,
+          error: message,
+          isTransient: true,
+        },
+        "Transient error during accounting sync - will retry with backoff",
       );
       throw error;
     } else {
-      // Permanent error (e.g. ValidationError). Discard further attempts so BullMQ doesn't retry this job.
-      console.error(
-        `[SyncWorker] [Job ${job.id}] Permanent error encountered during ${platform} sync: ${message}. Discarding future attempts.`,
+      // Permanent error (e.g. ValidationError)
+      logger.error(
+        {
+          jobId: job.id,
+          syncId,
+          transactionId,
+          platform,
+          attempt: job.attemptsMade + 1,
+          maxAttempts,
+          error: message,
+          isPermanent: true,
+        },
+        "Permanent error during accounting sync - moving to retry queue",
       );
       await logAccountingSyncError(transactionId, platform, message);
+
+      // Move failed job to accounting retry queue for manual/scheduled retry
+      if (isLastAttempt) {
+        try {
+          await addAccountingRetryJob(
+            {
+              originalJobId: job.id ?? "",
+              syncId,
+              transactionId,
+              platform,
+              payload,
+              failureReason: message,
+              previousAttempts: job.attemptsMade + 1,
+              failedAt: new Date().toISOString(),
+            },
+            {
+              delay: 60000, // Delay retry by 1 minute to allow investigation
+            },
+          );
+
+          logger.info(
+            {
+              jobId: job.id,
+              syncId,
+              transactionId,
+              platform,
+            },
+            "Moved failed accounting sync to retry queue",
+          );
+        } catch (queueErr) {
+          logger.error(
+            {
+              jobId: job.id,
+              syncId,
+              queueError: queueErr instanceof Error ? queueErr.message : String(queueErr),
+            },
+            "Failed to add accounting sync to retry queue",
+          );
+        }
+      }
 
       try {
         await job.discard();
       } catch (discardErr) {
-        console.error(
-          `[SyncWorker] Failed to discard job ${job.id}`,
-          discardErr,
+        logger.error(
+          {
+            jobId: job.id,
+            discardError: discardErr instanceof Error ? discardErr.message : String(discardErr),
+          },
+          "Failed to discard sync job",
         );
       }
 
