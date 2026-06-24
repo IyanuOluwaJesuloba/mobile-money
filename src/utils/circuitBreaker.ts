@@ -236,7 +236,7 @@ export async function checkAndResetCircuitBreaker(provider: string, operation: s
     const healthResult = await checkMobileMoneyHealth();
     const providerHealth = healthResult.providers[provider as keyof typeof healthResult.providers];
     if (providerHealth && providerHealth.status === "up") {
-      (breaker as any).close();
+      breaker.close();
       console.log(`Circuit breaker for ${provider}:${operation} reset due to health check`);
       return true;
     }

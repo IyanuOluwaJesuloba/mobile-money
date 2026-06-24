@@ -4,7 +4,7 @@ import { getConfigValue } from "../../../config/appConfig";
 
 // ─── Public types ─────────────────────────────────────────────────────────────
 
-export type ProviderName = "mtn" | "airtel" | "orange";
+export type ProviderName = "mtn" | "airtel" | "orange" | "orange_madagascar" | "sms_portal";
 export type ProviderStatus = "up" | "down";
 
 export interface ProviderHealth {
@@ -56,6 +56,13 @@ export const DEFAULT_PROVIDERS: ProviderConfig[] = [
     pingUrl:
       process.env.ORANGE_HEALTH_URL ??
       "https://api.orange.com/orange-money-webpay/dev/v1/webpayment",
+    timeoutMs: DEFAULT_TIMEOUT_MS,
+  },
+  {
+    name: "orange_madagascar",
+    pingUrl:
+      process.env.ORANGE_MADAGASCAR_HEALTH_URL ??
+      "https://api.orange.com/orange-money-webpay/mg/v1/webpayment",
     timeoutMs: DEFAULT_TIMEOUT_MS,
   },
 ];

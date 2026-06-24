@@ -8,6 +8,12 @@ process.env.ADMIN_API_KEY ??= "test-admin-key";
 process.env.DB_ENCRYPTION_KEY ??= "development-encryption-key-32-chars-long";
 process.env.KEY_VAULT_MASTER_SECRET ??= "test-key-vault-master-secret-32-chars-long";
 process.env.GEOLOCATION_API_KEY ??= "";
+process.env.SMS_PROVIDER ??= "none";
+process.env.WHATSAPP_ENABLED ??= "false";
+process.env.TWILIO_ACCOUNT_SID ??= "";
+process.env.TWILIO_AUTH_TOKEN ??= "";
+process.env.TWILIO_PHONE_NUMBER ??= "";
+process.env.TWILIO_WHATSAPP_NUMBER ??= "";
 
 // Global mock for axios to prevent real HTTP requests to sanction lists
 jest.mock("axios", () => {

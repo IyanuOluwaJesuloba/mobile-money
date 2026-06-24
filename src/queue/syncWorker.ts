@@ -7,56 +7,7 @@ import {
   NetworkError,
   ValidationError,
 } from "../services/accounting/accountingService";
-import {
-  natsManager,
-  NATS_QUEUE_ENABLED,
-  NATS_ACK_WAIT_MS,
-} from "./nats";
-import type { JsMsg } from "./nats";
-
-// ---------------------------------------------------------------------------
-// NATS JetStream consumer configuration for accounting sync
-// ---------------------------------------------------------------------------
-
-/**
- * NATS subject on which accounting sync messages are published.
- * Override via NATS_SYNC_SUBJECT env var.
- */
-export const NATS_SYNC_SUBJECT =
-  process.env.NATS_SYNC_SUBJECT || "accounting.sync";
-
-/**
- * Durable consumer name — must be stable across restarts so JetStream
- * tracks the consumer's stream position.
- * Override via NATS_SYNC_DURABLE_CONSUMER env var.
- */
-export const NATS_SYNC_DURABLE_CONSUMER =
-  process.env.NATS_SYNC_DURABLE_CONSUMER || "accounting-sync-consumer";
-
-/**
- * Queue-group (consumer group) name.  All worker instances that share this
- * name form a competing-consumer group: each message is delivered to exactly
- * one member, giving horizontal load-balancing without duplicate processing.
- * Override via NATS_CONSUMER_GROUP env var (shared with the transaction worker)
- * or the more specific NATS_SYNC_CONSUMER_GROUP env var.
- */
-export const NATS_SYNC_CONSUMER_GROUP =
-  process.env.NATS_SYNC_CONSUMER_GROUP ||
-  process.env.NATS_CONSUMER_GROUP ||
-  "accounting-sync-group";
-
-/**
- * Number of messages that may be in-flight (unacked) per worker instance.
- * Mirrors TRANSACTION_WORKER_CONCURRENCY semantics.
- */
-const SYNC_CONCURRENCY = Math.max(
-  1,
-  parseInt(process.env.SYNC_WORKER_CONCURRENCY || "3", 10),
-);
-
-// ---------------------------------------------------------------------------
-// Accounting service singleton
-// ---------------------------------------------------------------------------
+import { pool } from "../config/database";
 
 // Create instance of our Accounting Service
 export const accountingService = new AccountingService();
@@ -64,6 +15,23 @@ export const accountingService = new AccountingService();
 // ---------------------------------------------------------------------------
 // Core processing logic (shared by both BullMQ and NATS paths)
 // ---------------------------------------------------------------------------
+
+/**
+ * Log accounting sync error to dedicated table
+ */
+async function logAccountingSyncError(
+  transactionId: string,
+  providerType: 'quickbooks' | 'xero',
+  errorMessage: string,
+): Promise<void> {
+  await pool.query(
+    `INSERT INTO accounting_sync_errors
+       (transaction_id, provider_type, error_message, status)
+     VALUES ($1, $2, $3, 'pending')
+     ON CONFLICT DO NOTHING`,
+    [transactionId, providerType, errorMessage.slice(0, 500)],
+  );
+}
 
 /**
  * Sync Queue Processor Function
@@ -107,6 +75,7 @@ export async function processSyncJob(
       console.error(
         `[SyncWorker] [Job ${job.id}] Permanent error encountered during ${platform} sync: ${message}. Discarding future attempts.`,
       );
+      await logAccountingSyncError(transactionId, platform, message);
 
       try {
         await job.discard();
