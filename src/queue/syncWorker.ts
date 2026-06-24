@@ -7,9 +7,63 @@ import {
   NetworkError,
   ValidationError,
 } from "../services/accounting/accountingService";
+import {
+  natsManager,
+  NATS_QUEUE_ENABLED,
+  NATS_ACK_WAIT_MS,
+} from "./nats";
+import type { JsMsg } from "./nats";
+
+// ---------------------------------------------------------------------------
+// NATS JetStream consumer configuration for accounting sync
+// ---------------------------------------------------------------------------
+
+/**
+ * NATS subject on which accounting sync messages are published.
+ * Override via NATS_SYNC_SUBJECT env var.
+ */
+export const NATS_SYNC_SUBJECT =
+  process.env.NATS_SYNC_SUBJECT || "accounting.sync";
+
+/**
+ * Durable consumer name — must be stable across restarts so JetStream
+ * tracks the consumer's stream position.
+ * Override via NATS_SYNC_DURABLE_CONSUMER env var.
+ */
+export const NATS_SYNC_DURABLE_CONSUMER =
+  process.env.NATS_SYNC_DURABLE_CONSUMER || "accounting-sync-consumer";
+
+/**
+ * Queue-group (consumer group) name.  All worker instances that share this
+ * name form a competing-consumer group: each message is delivered to exactly
+ * one member, giving horizontal load-balancing without duplicate processing.
+ * Override via NATS_CONSUMER_GROUP env var (shared with the transaction worker)
+ * or the more specific NATS_SYNC_CONSUMER_GROUP env var.
+ */
+export const NATS_SYNC_CONSUMER_GROUP =
+  process.env.NATS_SYNC_CONSUMER_GROUP ||
+  process.env.NATS_CONSUMER_GROUP ||
+  "accounting-sync-group";
+
+/**
+ * Number of messages that may be in-flight (unacked) per worker instance.
+ * Mirrors TRANSACTION_WORKER_CONCURRENCY semantics.
+ */
+const SYNC_CONCURRENCY = Math.max(
+  1,
+  parseInt(process.env.SYNC_WORKER_CONCURRENCY || "3", 10),
+);
+
+// ---------------------------------------------------------------------------
+// Accounting service singleton
+// ---------------------------------------------------------------------------
 
 // Create instance of our Accounting Service
 export const accountingService = new AccountingService();
+
+// ---------------------------------------------------------------------------
+// Core processing logic (shared by both BullMQ and NATS paths)
+// ---------------------------------------------------------------------------
 
 /**
  * Sync Queue Processor Function
@@ -68,17 +122,108 @@ export async function processSyncJob(
   }
 }
 
+/**
+ * Processes a raw SyncJobData payload received from NATS.
+ * Returns true on success, throws on transient errors (triggering a nak),
+ * and swallows permanent errors after logging (triggering an ack to avoid
+ * infinite redelivery of unprocessable messages).
+ */
+async function processNatsSyncMessage(
+  data: SyncJobData,
+  msg: JsMsg,
+): Promise<void> {
+  const { syncId, transactionId, platform } = data;
+
+  console.log(
+    `[SyncWorker] [NATS] Processing accounting sync for transaction ${transactionId} to ${platform} (syncId=${syncId})`,
+  );
+
+  try {
+    if (platform === "quickbooks") {
+      await accountingService.syncToQuickBooks(transactionId, data.payload);
+    } else if (platform === "xero") {
+      await accountingService.syncToXero(transactionId, data.payload);
+    } else {
+      // Permanent — term the message so it is never redelivered
+      console.error(
+        `[SyncWorker] [NATS] Unsupported accounting platform: ${platform}. Terminating message.`,
+      );
+      msg.term();
+      return;
+    }
+
+    console.log(
+      `[SyncWorker] [NATS] Successfully synced transaction ${transactionId} to ${platform}.`,
+    );
+    // natsManager.consume acks on success; nothing extra needed here
+  } catch (error: unknown) {
+    const isTransient =
+      error instanceof RateLimitError || error instanceof NetworkError;
+    const message = error instanceof Error ? error.message : String(error);
+
+    if (isTransient) {
+      // Re-throw so natsManager.consume issues a nak and JetStream redelivers
+      console.warn(
+        `[SyncWorker] [NATS] Transient error for ${platform} sync (transactionId=${transactionId}): ${message}. Will nak for redelivery.`,
+      );
+      throw error;
+    } else {
+      // Permanent error — term to avoid infinite redelivery loop
+      console.error(
+        `[SyncWorker] [NATS] Permanent error for ${platform} sync (transactionId=${transactionId}): ${message}. Terminating message.`,
+      );
+      msg.term();
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// BullMQ Worker (active when NATS_QUEUE_ENABLED !== "true")
+// ---------------------------------------------------------------------------
+
 // Instantiate the BullMQ Worker
 export const syncWorker = new Worker<SyncJobData, SyncJobResult>(
   SYNC_QUEUE_NAME,
   processSyncJob,
   {
     ...queueOptions,
-    concurrency: 3, // Safe concurrency limit for accounting API rate-limits
+    concurrency: SYNC_CONCURRENCY, // Safe concurrency limit for accounting API rate-limits
   },
 );
 
-// Graceful shutdown helper
+// ---------------------------------------------------------------------------
+// NATS JetStream Consumer (active when NATS_QUEUE_ENABLED === "true")
+//
+// All instances sharing NATS_SYNC_CONSUMER_GROUP form a competing-consumer
+// group.  JetStream delivers each message to exactly one group member,
+// providing automatic load-balancing across horizontally-scaled workers
+// without duplicate processing.
+// ---------------------------------------------------------------------------
+
+if (NATS_QUEUE_ENABLED) {
+  natsManager
+    .consume<SyncJobData>(
+      NATS_SYNC_SUBJECT,
+      NATS_SYNC_DURABLE_CONSUMER,
+      NATS_SYNC_CONSUMER_GROUP,
+      processNatsSyncMessage,
+      SYNC_CONCURRENCY,
+    )
+    .catch((err) =>
+      console.error(
+        "[SyncWorker] [NATS] JetStream consumer error:",
+        err,
+      ),
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Graceful shutdown
+// ---------------------------------------------------------------------------
+
 export async function closeSyncWorker(): Promise<void> {
   await syncWorker.close();
+  if (NATS_QUEUE_ENABLED) {
+    await natsManager.close();
+  }
 }
