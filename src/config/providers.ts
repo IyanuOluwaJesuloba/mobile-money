@@ -2,6 +2,7 @@ export enum MobileMoneyProvider {
   MTN = "mtn",
   AIRTEL = "airtel",
   ORANGE = "orange",
+  WAVE = "wave",
 }
 
 export interface ProviderLimits {
@@ -13,12 +14,14 @@ export interface ProviderLimitsConfig {
   [MobileMoneyProvider.MTN]: ProviderLimits;
   [MobileMoneyProvider.AIRTEL]: ProviderLimits;
   [MobileMoneyProvider.ORANGE]: ProviderLimits;
+  [MobileMoneyProvider.WAVE]: ProviderLimits;
 }
 
 export const DEFAULT_PROVIDER_LIMITS: ProviderLimitsConfig = {
   [MobileMoneyProvider.MTN]: { minAmount: 100, maxAmount: 500000 },
   [MobileMoneyProvider.AIRTEL]: { minAmount: 100, maxAmount: 1000000 },
   [MobileMoneyProvider.ORANGE]: { minAmount: 500, maxAmount: 750000 },
+  [MobileMoneyProvider.WAVE]: { minAmount: 1, maxAmount: 2000000 },
 };
 
 function parseEnvNumber(key: string, defaultValue: number): number {
@@ -63,6 +66,16 @@ export const PROVIDER_LIMITS: ProviderLimitsConfig = {
       DEFAULT_PROVIDER_LIMITS[MobileMoneyProvider.ORANGE].maxAmount,
     ),
   },
+  [MobileMoneyProvider.WAVE]: {
+    minAmount: parseEnvNumber(
+      "WAVE_MIN_AMOUNT",
+      DEFAULT_PROVIDER_LIMITS[MobileMoneyProvider.WAVE].minAmount,
+    ),
+    maxAmount: parseEnvNumber(
+      "WAVE_MAX_AMOUNT",
+      DEFAULT_PROVIDER_LIMITS[MobileMoneyProvider.WAVE].maxAmount,
+    ),
+  },
 };
 
 export function getProviderLimits(
@@ -103,6 +116,7 @@ function validateLimitsConfig(): void {
     MobileMoneyProvider.MTN,
     MobileMoneyProvider.AIRTEL,
     MobileMoneyProvider.ORANGE,
+    MobileMoneyProvider.WAVE,
   ];
 
   for (const provider of providers) {

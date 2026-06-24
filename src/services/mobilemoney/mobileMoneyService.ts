@@ -68,6 +68,11 @@ async function loadProvider(key: string): Promise<MobileMoneyProvider> {
       return new mod.OrangeProvider();
     }
 
+    case "wave": {
+      const mod = await import("./providers/waveSenegal");
+      return new mod.WaveSenegalProvider();
+    }
+
     default:
       throw new Error(`Unknown provider: ${key}`);
   }
