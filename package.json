@@ -131,7 +131,7 @@
     "node-cache": "^5.1.2",
     "node-cron": "^3.0.3",
     "nodemailer": "^8.0.4",
-    "opossum": "^9.0.0",
+    "opossum": "9.0.0",
     "passport": "^0.7.0",
     "passport-google-oauth20": "^2.0.0",
     "passport-openidconnect": "^0.1.2",

@@ -31,6 +31,26 @@ type ProviderCircuitBreaker<T> = CircuitBreaker<
   CircuitBreakerActionResult<T>
 >;
 
+/**
+ * Declare a `.toJSON()` method on the generic `CircuitBreaker` interface.
+ *
+ * opossum (pinned to `9.0.0` in `package.json`) ships only `*.js` source
+ * with no `.d.ts`. When TypeScript infers the class' shape from those JS
+ * sources it does not include the runtime `CircuitBreaker#toJSON`
+ * method that opossum adds for `JSON.stringify(breaker)` support. Any
+ * downstream consumer that serialises a `ProviderCircuitBreaker` would
+ * trip a `TS2339: Property 'toJSON' does not exist on type
+ * 'ProviderCircuitBreaker<unknown>'` error. This module
+ * augmentation makes the method visible to the type checker without
+ * touching opossum's runtime behaviour.
+ */
+declare module "opossum" {
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  interface CircuitBreaker<_Args, _R> {
+    toJSON?: () => unknown;
+  }
+}
+
 const circuitBreakers = new Map<string, ProviderCircuitBreaker<unknown>>();
 
 const CIRCUIT_STATE_VALUES = {
