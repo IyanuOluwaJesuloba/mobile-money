@@ -1,6 +1,16 @@
 import { Request, Response, NextFunction } from "express";
 import crypto from "crypto";
 import { config } from "../config/env";
+import logger from "../logger";
+
+/**
+ * Verifies the HMAC-SHA256 signature on incoming webhook requests.
+ * Rejects requests whose x-bridge-signature header does not match the
+ * expected digest of the raw request body.
+ *
+ * Logs a structured warning on every rejected request so security teams
+ * can monitor for signature mismatches without parsing free-text messages.
+ */
 
 function getRawBody(req: Request): Buffer {
   // body parsers can attach a raw body buffer to the request (app.ts config).
@@ -27,11 +37,18 @@ export const verifyWebhookSignature = (
     req.headers["x-bridge-signature-256"]) as string | undefined;
 
   if (!signatureHeader) {
+    logger.warn(
+      { path: req.path, method: req.method },
+      "Webhook rejected: missing signature header",
+    );
     return res.status(401).json({ error: "Missing signature header" });
   }
 
   if (!config.webhookSecret) {
-    console.error("WEBHOOK_SECRET not configured; rejecting webhook request");
+    logger.error(
+      { path: req.path, method: req.method },
+      "WEBHOOK_SECRET not configured; rejecting webhook request",
+    );
     return res.status(500).json({ error: "Server misconfigured" });
   }
 
@@ -55,9 +72,17 @@ export const verifyWebhookSignature = (
       return next();
     }
   } catch (e) {
+    logger.error(
+      { path: req.path, method: req.method, err: e },
+      "Error during signature verification",
+    );
     // fall through to unauthorized below
   }
 
+  logger.warn(
+    { path: req.path, method: req.method },
+    "Webhook rejected: invalid signature",
+  );
   return res.status(401).json({ error: "Invalid signature" });
 };
 
