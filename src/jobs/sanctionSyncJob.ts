@@ -1,3 +1,4 @@
+import logger from "../utils/logger";
 import { sanctionService } from "../services/sanctionService";
 
 const SANCTION_FEED_URL =
@@ -13,16 +14,17 @@ const BATCH_SIZE = parseInt(process.env.SANCTION_SYNC_BATCH_SIZE ?? "500", 10);
  * upserts each batch into the DB, then clears the match cache.
  */
 export async function runSanctionSyncJob(): Promise<void> {
-  console.log("[sanction-sync] Starting sanctions list sync");
-
-  let totalIndexed = 0;
-  let batchCount = 0;
-
-  for await (const batch of sanctionService.streamSanctionUpdates(SANCTION_FEED_URL, BATCH_SIZE)) {
-    await sanctionService.updateSanctionListBatch(batch);
-    totalIndexed += batch.length;
-    batchCount++;
-    console.log(`[sanction-sync] Indexed batch ${batchCount} (${batch.length} entities, ${totalIndexed} total)`);
+  console.log("[sanction-sync] Starting daily sanction list synchronization...");
+  
+  try {
+    const updates = await sanctionService.fetchSanctionUpdates();
+    console.log(`[sanction-sync] Fetched ${updates.length} entities from global lists.`);
+    
+    await sanctionService.updateSanctionList(updates);
+    console.log("[sanction-sync] Successfully updated internal sanction blacklist.");
+  } catch (error) {
+    logger.error("[sanction-sync] Critical failure during sanction sync:", error);
+    throw error;
   }
 
   await sanctionService.clearSanctionMatchCache();
