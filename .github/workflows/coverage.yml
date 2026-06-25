@@ -52,7 +52,7 @@ jobs:
       - name: Verify package-lock.json exists
         run: |
           if [ ! -f package-lock.json ]; then
-            npm install --package-lock-only
+            npm install --package-lock-only --ignore-scripts
           fi
 
       - name: Install system dependencies

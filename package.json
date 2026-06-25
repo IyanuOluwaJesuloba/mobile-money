@@ -5,7 +5,7 @@
   "main": "dist/index.js",
   "scripts": {
     "momo-cli": "tsx src/scripts/momo-cli.ts",
-    "prepare": "husky",
+    "prepare": "node -e \"if (!process.env.CI && process.env.NODE_ENV !== 'production') { try { require('child_process').execSync('husky', { shell: true, stdio: 'ignore' }) } catch (e) {} }\"",
     "audit:high": "npm audit --audit-level=high",
     "snyk:test:high": "snyk test --severity-threshold=high",
     "format": "prettier --write .",
