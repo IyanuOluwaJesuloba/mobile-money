@@ -1,3 +1,4 @@
+import logger from "../utils/logger";
 import { Router, Request, Response } from "express";
 import { sep24RateLimiter } from "../middleware/rateLimit";
 import { v4 as uuidv4 } from "uuid";
@@ -342,7 +343,7 @@ export const updateTransactionStatus = (
 
   if (statusChanged && transaction.callback) {
     enqueueSepWebhook(transaction.id, status, transaction.callback, transaction).catch((err) =>
-      console.error(`[sep24-webhook] Error enqueuing webhook:`, err)
+      logger.error(`[sep24-webhook] Error enqueuing webhook:`, err)
     );
   }
 
@@ -393,7 +394,7 @@ export const processCallback = async (
 
   if (statusChanged && transaction.callback) {
     enqueueSepWebhook(transaction.id, status, transaction.callback, transaction).catch((err) =>
-      console.error(`[sep24-webhook] Error enqueuing webhook:`, err)
+      logger.error(`[sep24-webhook] Error enqueuing webhook:`, err)
     );
   }
 

@@ -1,8 +1,11 @@
+import logger from "../utils/logger";
 import { Router, Request, Response } from "express";
-import { createHmac, timingSafeEqual } from "crypto";
+import { createHmac, timingSafeEqual, verify, createPublicKey } from "crypto";
+import { Keypair } from "stellar-sdk";
 import { TransactionModel, TransactionStatus } from "../models/transaction";
 import { WebhookService, WebhookEvent } from "../services/webhook";
 import { ingestRateLimiter } from "../middleware/ingestRateLimit";
+import { AirtelSignatureValidator } from "../utils/airtelSignatureValidator";
 
 const router = Router();
 const transactionModel = new TransactionModel();
@@ -67,11 +70,31 @@ export const SAMPLE_WEBHOOK_PAYLOAD: FlatWebhookPayload = {
 };
 
 function verifyWebhookSignature(payload: string, signature: string | undefined, secret: string): boolean {
-  if (!signature || !signature.startsWith("sha256=")) return false;
-  const expectedSignature = signature.substring(7);
-  const computedSignature = createHmac("sha256", secret).update(payload).digest("hex");
-  if (expectedSignature.length !== computedSignature.length) return false;
-  return timingSafeEqual(Buffer.from(expectedSignature), Buffer.from(computedSignature));
+  if (!signature) return false;
+
+  if (signature.startsWith("ed25519=")) {
+    const expectedSignature = signature.substring(8);
+    try {
+      if (secret.startsWith("G") && secret.length === 56) {
+        const kp = Keypair.fromPublicKey(secret);
+        return kp.verify(Buffer.from(payload), Buffer.from(expectedSignature, "hex"));
+      } else {
+        const key = createPublicKey(secret);
+        return verify(null, Buffer.from(payload), key, Buffer.from(expectedSignature, "hex"));
+      }
+    } catch (e) {
+      return false;
+    }
+  }
+
+  if (signature.startsWith("sha256=")) {
+    const expectedSignature = signature.substring(7);
+    const computedSignature = createHmac("sha256", secret).update(payload).digest("hex");
+    if (expectedSignature.length !== computedSignature.length) return false;
+    return timingSafeEqual(Buffer.from(expectedSignature), Buffer.from(computedSignature));
+  }
+
+  return false;
 }
 
 /** GET /webhooks/settings - returns current compression toggle state */
@@ -122,8 +145,8 @@ router.get("/schema", (req: Request, res: Response) => {
       },
     },
     setup_instructions: {
-      zapier: { webhook_url: `${req.protocol}://${req.get("host")}/api/webhooks`, authentication: "X-Webhook-Signature header with HMAC-SHA256" },
-      make_com: { webhook_url: `${req.protocol}://${req.get("host")}/api/webhooks`, authentication: "X-Webhook-Signature header with HMAC-SHA256" },
+      zapier: { webhook_url: `${req.protocol}://${req.get("host")}/api/webhooks`, authentication: "X-Webhook-Signature header with HMAC-SHA256 (sha256=...) or ED25519 (ed25519=...)" },
+      make_com: { webhook_url: `${req.protocol}://${req.get("host")}/api/webhooks`, authentication: "X-Webhook-Signature header with HMAC-SHA256 (sha256=...) or ED25519 (ed25519=...)" },
     },
   });
 });
@@ -133,7 +156,7 @@ router.get("/sample", (req: Request, res: Response) => res.json(SAMPLE_WEBHOOK_P
 router.post("/", async (req: Request, res: Response) => {
   const webhookSecret = process.env.WEBHOOK_SECRET;
   if (!webhookSecret) {
-    console.error("[webhook] WEBHOOK_SECRET not configured");
+    logger.error("[webhook] WEBHOOK_SECRET not configured");
     return res.status(500).json({ error: "Webhook processing not configured" });
   }
   const signature = req.headers["x-webhook-signature"] as string | undefined;
@@ -158,7 +181,53 @@ router.post("/", async (req: Request, res: Response) => {
     console.log(`[webhook] Processed event ${payload.event_id} for transaction ${payload.transaction_id}`);
     return res.status(200).json({ success: true, event_id: payload.event_id, transaction_id: payload.transaction_id, processed_at: new Date().toISOString() });
   } catch (error) {
-    console.error("[webhook] Processing error", error);
+    logger.error("[webhook] Processing error", error);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+const airtelValidator = new AirtelSignatureValidator();
+
+export async function verifyAirtelWebhookSignature(req: Request, res: Response, next: () => void) {
+  const signature = req.headers["x-airtel-signature"] as string | undefined;
+  if (!signature) {
+    console.warn("[webhook-airtel] Missing signature header");
+    return res.status(400).json({ error: "Missing x-airtel-signature header" });
+  }
+
+  const rawPayload = JSON.stringify(req.body);
+  const isValid = await airtelValidator.verifySignature(rawPayload, signature);
+  if (!isValid) {
+    console.warn("[webhook-airtel] Invalid signature");
+    return res.status(400).json({ error: "Invalid signature" });
+  }
+
+  next();
+}
+
+router.post("/airtel", verifyAirtelWebhookSignature, async (req: Request, res: Response) => {
+  try {
+    const payload = req.body as FlatWebhookPayload;
+    if (!payload.transaction_id || !payload.event_type) {
+      return res.status(400).json({ error: "Missing required fields" });
+    }
+    const transaction = await transactionModel.findById(payload.transaction_id);
+    if (!transaction) {
+      return res.status(404).json({ error: "Transaction not found", transaction_id: payload.transaction_id });
+    }
+    if (payload.status && payload.status !== transaction.status) {
+      await transactionModel.updateStatus(transaction.id, payload.status as TransactionStatus);
+      console.log(`[webhook-airtel] Updated transaction ${transaction.id} to ${payload.status}`);
+    }
+    console.log(`[webhook-airtel] Processed event ${payload.event_id} for transaction ${payload.transaction_id}`);
+    return res.status(200).json({
+      success: true,
+      event_id: payload.event_id,
+      transaction_id: payload.transaction_id,
+      processed_at: new Date().toISOString()
+    });
+  } catch (error) {
+    console.error("[webhook-airtel] Processing error", error);
     return res.status(500).json({ error: "Internal server error" });
   }
 });

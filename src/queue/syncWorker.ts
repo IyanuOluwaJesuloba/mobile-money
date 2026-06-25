@@ -1,3 +1,4 @@
+import logger from "../utils/logger";
 import { Worker, Job } from "bullmq";
 import { queueOptions } from "./config";
 import { SyncJobData, SyncJobResult, SYNC_QUEUE_NAME } from "./syncQueue";

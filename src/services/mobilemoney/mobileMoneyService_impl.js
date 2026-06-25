@@ -209,6 +209,8 @@ function loadProvider(key) {
               return [3 /*break*/, 10];
             case "mock":
               return [3 /*break*/, 8];
+            case "moov":
+              return [3 /*break*/, 12];
           }
           return [3 /*break*/, 7];
         case 1:
@@ -263,6 +265,16 @@ function loadProvider(key) {
         case 11:
           mod = _b.sent();
           return [2 /*return*/, new mod.VodacomProvider()];
+        case 12:
+          return [
+            4 /*yield*/,
+            Promise.resolve().then(function () {
+              return require("./providers/moov");
+            }),
+          ];
+        case 13:
+          mod = _b.sent();
+          return [2 /*return*/, new mod.MoovProvider()];
       }
     });
   });

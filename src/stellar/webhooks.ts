@@ -1,5 +1,7 @@
+import logger from "../utils/logger";
 import { Router, Request, Response } from "express";
-import { createHmac, timingSafeEqual } from "crypto";
+import { createHmac, timingSafeEqual, verify, createPublicKey } from "crypto";
+import { Keypair } from "stellar-sdk";
 import { z } from "zod";
 import { TransactionModel, TransactionStatus } from "../models/transaction";
 import { notifyTransactionWebhook, WebhookEvent } from "../services/webhook";
@@ -45,30 +47,47 @@ function verifyWebhookSignature(
   signature: string | undefined,
   secret: string,
 ): boolean {
-  if (!signature || !signature.startsWith("sha256=")) {
-    return false;
+  if (!signature) return false;
+
+  if (signature.startsWith("ed25519=")) {
+    const expectedSignature = signature.substring(8);
+    try {
+      if (secret.startsWith("G") && secret.length === 56) {
+        const kp = Keypair.fromPublicKey(secret);
+        return kp.verify(Buffer.from(payload), Buffer.from(expectedSignature, "hex"));
+      } else {
+        const key = createPublicKey(secret);
+        return verify(null, Buffer.from(payload), key, Buffer.from(expectedSignature, "hex"));
+      }
+    } catch (e) {
+      return false;
+    }
   }
 
-  const expectedSignature = signature.substring(7);
-  const computedSignature = createHmac("sha256", secret)
-    .update(payload)
-    .digest("hex");
+  if (signature.startsWith("sha256=")) {
+    const expectedSignature = signature.substring(7);
+    const computedSignature = createHmac("sha256", secret)
+      .update(payload)
+      .digest("hex");
 
-  if (expectedSignature.length !== computedSignature.length) {
-    return false;
+    if (expectedSignature.length !== computedSignature.length) {
+      return false;
+    }
+
+    return timingSafeEqual(
+      Buffer.from(expectedSignature),
+      Buffer.from(computedSignature),
+    );
   }
 
-  return timingSafeEqual(
-    Buffer.from(expectedSignature),
-    Buffer.from(computedSignature),
-  );
+  return false;
 }
 
 router.post("/webhook", async (req: RawBodyRequest, res: Response) => {
   const webhookSecret = process.env.STELLAR_WEBHOOK_SECRET;
 
   if (!webhookSecret) {
-    console.error("[stellar-webhook] STELLAR_WEBHOOK_SECRET not configured");
+    logger.error("[stellar-webhook] STELLAR_WEBHOOK_SECRET not configured");
     return res.status(500).json({ error: "Webhook processing not configured" });
   }
 
@@ -175,7 +194,7 @@ router.post("/webhook", async (req: RawBodyRequest, res: Response) => {
               stellar_memo_type: sep31Meta.memo_type,
             }
           ).catch((err) =>
-            console.error(`[sep31-webhook] Error enqueuing webhook:`, err)
+            logger.error(`[sep31-webhook] Error enqueuing webhook:`, err)
           );
         }
       }
@@ -192,7 +211,7 @@ router.post("/webhook", async (req: RawBodyRequest, res: Response) => {
       updated,
     });
   } catch (error) {
-    console.error("[stellar-webhook] Processing error", error);
+    logger.error("[stellar-webhook] Processing error", error);
     return res.status(500).json({ error: "Internal server error" });
   }
 });

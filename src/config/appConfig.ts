@@ -99,6 +99,24 @@ export const configSchema = convict({
         default: 1000000,
         env: "AIRTEL_MAX_AMOUNT",
       },
+      webBaseUrl: {
+        doc: "Airtel web base URL (session mode)",
+        format: String,
+        default: "",
+        env: "AIRTEL_WEB_BASE_URL",
+      },
+      directBaseUrl: {
+        doc: "Airtel direct base URL (OAuth2 mode)",
+        format: String,
+        default: "https://openapi.airtel.africa",
+        env: "AIRTEL_DIRECT_BASE_URL",
+      },
+      sandboxBaseUrl: {
+        doc: "Airtel sandbox base URL (for sandbox mode)",
+        format: String,
+        default: "https://sandbox.airtel.africa",
+        env: "AIRTEL_SANDBOX_BASE_URL",
+      },
     },
     orange: {
       minAmount: {
@@ -314,6 +332,12 @@ export const configSchema = convict({
       doc: "Orange refresh token skew in milliseconds",
       format: "nat",
       default: 60000, // 1 minute
+    },
+    requestTimeoutMs: {
+      doc: 'Orange API request timeout in milliseconds',
+      format: 'nat',
+      default: 30000,
+      env: 'ORANGE_REQUEST_TIMEOUT_MS',
     },
   },
 

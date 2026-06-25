@@ -1,3 +1,4 @@
+import logger from "../utils/logger";
 import { NextFunction, Router } from "express";
 import { Pool } from "pg";
 import { KYCController } from "../controllers/kycController";
@@ -226,7 +227,7 @@ export const createKYCRoutes = (db: Pool): Router => {
         },
       });
     } catch (error) {
-      console.error("Document upload error:", error);
+      logger.error("Document upload error:", error);
 
       if ((error as any).statusCode) {
         throw error;
@@ -312,7 +313,7 @@ export const createKYCRoutes = (db: Pool): Router => {
         data: documents,
       });
     } catch (error) {
-      console.error("Get documents error:", error);
+      logger.error("Get documents error:", error);
       if ((error as any).statusCode) {
         throw error;
       }

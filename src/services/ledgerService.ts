@@ -190,7 +190,9 @@ export class LedgerService {
     description: string,
     entries: LedgerEntry[],
     transactionId?: string,
-    postedBy?: string
+    postedBy?: string,
+    currency?: SupportedCurrency,
+    conversionRate?: number
   ): Promise<PostedEntry[]> {
     validateLedgerEntries(entries);
 
@@ -207,7 +209,7 @@ export class LedgerService {
           description,
           transactionId || null,
           postedBy || null,
-          JSON.stringify(entries)
+          JSON.stringify(enrichedEntries)
         ]
       );
 
@@ -226,15 +228,39 @@ export class LedgerService {
       client.release();
     }
   }
+/* Duplicate block removed */
 
   /**
-   * Post a deposit transaction
-   * Debit: Mobile Money Float (asset increases)
-   * Credit: Customer Balances (liability increases)
+   * Post a deposit transaction.
+   * Convenience wrapper that calls postDepositWithCurrency with BASE_CURRENCY (USD).
    */
   async postDeposit(
     amount: number,
     fee: number,
+    referenceNumber: string,
+    transactionId: string,
+    userId: string
+  ): Promise<PostedEntry[]> {
+    return this.postDepositWithCurrency(
+      amount,
+      fee,
+      BASE_CURRENCY,
+      referenceNumber,
+      transactionId,
+      userId
+    );
+  }
+
+  /**
+   * Post a deposit transaction with currency conversion.
+   * `amount` and `fee` are in the original `currency`.
+   * The amounts are converted to base currency (USD) for ledger accounting.
+   * Metadata records original currency and conversion rate.
+   */
+  async postDepositWithCurrency(
+    amount: number,
+    fee: number,
+    currency: SupportedCurrency,
     referenceNumber: string,
     transactionId: string,
     userId: string
@@ -249,17 +275,31 @@ export class LedgerService {
     settlementDate.setDate(settlementDate.getDate() + delayDays);
     const settlementDateStr = settlementDate.toISOString().split('T')[0];
 
+    // Compute conversion to base currency (USD) for amount and fee
+    const amountConversion = currencyService.convertToBase(amount, currency);
+    const feeConversion = currencyService.convertToBase(fee, currency);
+
     const entries: LedgerEntry[] = [
       {
         account_code: '1100', // Mobile Money Float
-        debit_amount: amount,
-        description: 'Customer deposit received'
+        debit_amount: amountConversion.convertedAmount,
+        description: 'Customer deposit received',
+        metadata: {
+          originalAmount: amount,
+          originalCurrency: currency,
+          conversionRate: amountConversion.rate,
+        },
       },
       {
         account_code: '2000', // Customer Balances
-        credit_amount: amount - fee,
+        credit_amount: amountConversion.convertedAmount - feeConversion.convertedAmount,
         description: 'Customer balance credited',
-        settlement_date: settlementDateStr
+        settlement_date: settlementDateStr,
+        metadata: {
+          originalAmount: amount - fee,
+          originalCurrency: currency,
+          conversionRate: amountConversion.rate,
+        }
       }
     ];
 
@@ -267,24 +307,30 @@ export class LedgerService {
     if (fee > 0) {
       entries.push({
         account_code: '4100', // Deposit Fee Revenue
-        credit_amount: fee,
-        description: 'Deposit fee earned'
+        credit_amount: feeConversion.convertedAmount,
+        description: 'Deposit fee earned',
+        metadata: {
+          originalAmount: fee,
+          originalCurrency: currency,
+          conversionRate: feeConversion.rate,
+        },
       });
     }
 
     return this.postTransaction(
       referenceNumber,
-      `Deposit: ${amount} (fee: ${fee})`,
+      `Deposit: ${amount} ${currency} (fee: ${fee} ${currency})`,
       entries,
       transactionId,
-      userId
+      userId,
+      currency,
+      amountConversion.rate
     );
   }
 
   /**
-   * Post a withdrawal transaction
-   * Debit: Customer Balances (liability decreases)
-   * Credit: Mobile Money Float (asset decreases)
+   * Post a withdrawal transaction.
+   * Convenience wrapper that calls postWithdrawalWithCurrency with BASE_CURRENCY (USD).
    */
   async postWithdrawal(
     amount: number,
@@ -293,16 +339,54 @@ export class LedgerService {
     transactionId: string,
     userId: string
   ): Promise<PostedEntry[]> {
+    return this.postWithdrawalWithCurrency(
+      amount,
+      fee,
+      BASE_CURRENCY,
+      referenceNumber,
+      transactionId,
+      userId
+    );
+  }
+
+  /**
+   * Post a withdrawal transaction with currency conversion.
+   * `amount` and `fee` are in the original `currency`.
+   * The amounts are converted to base currency (USD) for ledger accounting.
+   * Metadata records original currency and conversion rate.
+   */
+  async postWithdrawalWithCurrency(
+    amount: number,
+    fee: number,
+    currency: SupportedCurrency,
+    referenceNumber: string,
+    transactionId: string,
+    userId: string
+  ): Promise<PostedEntry[]> {
+    // Compute conversion to base currency (USD) for amount and fee
+    const amountConversion = currencyService.convertToBase(amount, currency);
+    const feeConversion = currencyService.convertToBase(fee, currency);
+
     const entries: LedgerEntry[] = [
       {
         account_code: '2000', // Customer Balances
-        debit_amount: amount + fee,
-        description: 'Customer balance debited'
+        debit_amount: amountConversion.convertedAmount + feeConversion.convertedAmount,
+        description: 'Customer balance debited',
+        metadata: {
+          originalAmount: amount + fee,
+          originalCurrency: currency,
+          conversionRate: amountConversion.rate,
+        },
       },
       {
         account_code: '1100', // Mobile Money Float
-        credit_amount: amount,
-        description: 'Withdrawal paid out'
+        credit_amount: amountConversion.convertedAmount,
+        description: 'Withdrawal paid out',
+        metadata: {
+          originalAmount: amount,
+          originalCurrency: currency,
+          conversionRate: amountConversion.rate,
+        },
       }
     ];
 
@@ -310,17 +394,24 @@ export class LedgerService {
     if (fee > 0) {
       entries.push({
         account_code: '4200', // Withdrawal Fee Revenue
-        credit_amount: fee,
-        description: 'Withdrawal fee earned'
+        credit_amount: feeConversion.convertedAmount,
+        description: 'Withdrawal fee earned',
+        metadata: {
+          originalAmount: fee,
+          originalCurrency: currency,
+          conversionRate: feeConversion.rate,
+        },
       });
     }
 
     return this.postTransaction(
       referenceNumber,
-      `Withdrawal: ${amount} (fee: ${fee})`,
+      `Withdrawal: ${amount} ${currency} (fee: ${fee} ${currency})`,
       entries,
       transactionId,
-      userId
+      userId,
+      currency,
+      amountConversion.rate
     );
   }
 
