@@ -300,7 +300,7 @@ export class LedgerService {
           originalCurrency: currency,
           conversionRate: amountConversion.rate,
         }
-      }
+      },
     ];
 
     // Add fee revenue if applicable

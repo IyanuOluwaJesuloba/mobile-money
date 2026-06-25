@@ -24,7 +24,7 @@ jobs:
       - name: Verify package-lock.json exists
         run: |
           if [ ! -f package-lock.json ]; then
-            npm install --package-lock-only
+            npm install --package-lock-only --ignore-scripts
           fi
 
       - name: Install dependencies
@@ -54,7 +54,7 @@ jobs:
         run: |
           if [ ! -f package-lock.json ]; then
             echo "⚠️ package-lock.json not found, generating it..."
-            npm install --package-lock-only
+            npm install --package-lock-only --ignore-scripts
           else
             echo "✅ package-lock.json found"
           fi
@@ -93,7 +93,7 @@ jobs:
         run: |
           if [ ! -f package-lock.json ]; then
             echo "⚠️ bridge-starter-node/package-lock.json not found, generating it..."
-            npm install --package-lock-only
+            npm install --package-lock-only --ignore-scripts
           else
             echo "✅ bridge-starter-node/package-lock.json found"
           fi
@@ -163,7 +163,7 @@ jobs:
         run: |
           if [ ! -f package-lock.json ]; then
             echo "⚠️ package-lock.json not found, generating it..."
-            npm install --package-lock-only
+            npm install --package-lock-only --ignore-scripts
           else
             echo "✅ package-lock.json found"
           fi
@@ -287,7 +287,7 @@ jobs:
         run: |
           if [ ! -f package-lock.json ]; then
             echo "⚠️ package-lock.json not found, generating it..."
-            npm install --package-lock-only
+            npm install --package-lock-only --ignore-scripts
           else
             echo "✅ package-lock.json found"
           fi
