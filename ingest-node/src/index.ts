@@ -30,7 +30,7 @@ import Fastify from "fastify";
 import { z } from "zod";
 import Redis from "ioredis";
 import { connect as natsConnect, StringCodec, type NatsConnection } from "nats";
-import { Registry, Counter, Histogram, collectDefaultMetrics } from "prom-client";
+import { Registry, Counter, Histogram, Gauge, collectDefaultMetrics } from "prom-client";
 import fastifyRateLimit from "@fastify/rate-limit";
 
 // ---------------------------------------------------------------------------
@@ -93,7 +93,7 @@ const redisPoolConnectionsTotal = new Counter({
   registers: [register],
 });
 
-const redisPoolConnectionsActive = new Counter({
+const redisPoolConnectionsActive = new Gauge({
   name: "redis_pool_connections_active",
   help: "Number of active Redis pool connections",
   labelNames: ["state"], // available, in_use
