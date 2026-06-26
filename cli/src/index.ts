@@ -6,6 +6,7 @@ import { registerProfileCommand } from "./commands/profile";
 import { registerRetryCommand } from "./commands/retry";
 import { registerStatusCommand } from "./commands/status";
 import { registerDashboardCommand } from "./commands/dashboard";
+import { registerEscrowCommand } from "./commands/escrow";
 import { printError } from "./dashboard";
 
 const program = new Command("momo-cli")
@@ -18,6 +19,7 @@ registerRetryCommand(program);
 registerConfigCommand(program);
 registerProfileCommand(program);
 registerDashboardCommand(program);
+registerEscrowCommand(program);
 
 program.parseAsync(process.argv).catch((err: unknown) => {
   const msg = err instanceof Error ? err.message : String(err);

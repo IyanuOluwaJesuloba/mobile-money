@@ -136,3 +136,18 @@ export async function getQueueMetrics() {
     throw new Error(extractMessage(err));
   }
 }
+
+export async function releaseEscrow(
+  escrowId: string,
+  signatures: { signerIndex: number; key: string }[],
+): Promise<{ message: string; txHash?: string }> {
+  try {
+    const { data } = await buildClient().post<{
+      message: string;
+      txHash?: string;
+    }>(`/api/admin/escrow/${escrowId}/release`, { signatures });
+    return data;
+  } catch (err) {
+    throw new Error(extractMessage(err));
+  }
+}
