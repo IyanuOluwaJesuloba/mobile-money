@@ -82,6 +82,7 @@ import { createAdminSep10Router } from "./stellar/adminSep10";
 import tomlRouter from "./routes/toml";
 import feeStrategiesRouter from "./routes/feeStrategies";
 import { ipBlacklistMiddleware } from "./middleware/ipBlacklist";
+import { providerLogMaskingMiddleware } from "./middleware/providerLogMasking";
 import crossChainRouter from "./routes/crossChain";
 import stellarRouter from "./routes/stellar";
 import reconciliationRoutes from "./routes/reconciliation";
@@ -185,6 +186,7 @@ app.use(i18nMiddleware);
 // business logic, session handling, or route matching.
 app.use(ipBlacklistMiddleware);
 app.use(dbConnectionLeakDetector);
+app.use(providerLogMaskingMiddleware);
 
 app.use((req: Request, res: Response, next: NextFunction) => {
   if (isShuttingDown) {
