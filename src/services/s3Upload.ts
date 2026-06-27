@@ -1,9 +1,18 @@
+import fs from "fs";
+import path from "path";
 import logger from "../utils/logger";
 import { PutObjectCommand, HeadObjectCommand } from "@aws-sdk/client-s3";
 import crypto from "crypto";
 import { getS3Client, s3Config, getS3ObjectUrl } from "../config/s3";
 import { generateUniqueFilename, generateS3Key } from "../middleware/upload";
 import { KmsFileSigner, createFileSignerFromEnv, FileSignature } from "./stellar/hsmService";
+
+const DEV_UPLOAD_DIR = path.join(process.cwd(), "uploads", "kyc-dev");
+
+function maskKycFilename(originalname: string): string {
+  const ext = path.extname(originalname);
+  return crypto.randomBytes(16).toString("hex") + ext;
+}
 
 export interface UploadResult {
   success: boolean;
@@ -35,6 +44,20 @@ export const uploadToS3 = async (
 ): Promise<UploadResult> => {
   try {
     const { userId, file, metadata = {} } = options;
+
+    // Dev mode: write to local disk with a masked (hashed) filename instead of S3
+    if (process.env.NODE_ENV !== "production" && !s3Config.bucket) {
+      const maskedFilename = maskKycFilename(file.originalname);
+      fs.mkdirSync(DEV_UPLOAD_DIR, { recursive: true });
+      const localPath = path.join(DEV_UPLOAD_DIR, maskedFilename);
+      fs.writeFileSync(localPath, file.buffer);
+      logger.info({ userId, localPath }, "KYC file saved to local disk (dev mode)");
+      return {
+        success: true,
+        fileUrl: `file://${localPath}`,
+        key: maskedFilename,
+      };
+    }
 
     // Generate unique filename and S3 key
     const uniqueFilename = generateUniqueFilename(file.originalname);
