@@ -176,7 +176,7 @@ function getReferenceId(
 export function createProviderMockApp() {
   const app = express();
   const transactions = new Map<string, StoredTransaction>();
-
+  
   app.use(express.json());
 
   app.get("/health", (_req: Request, res: Response) => {
@@ -569,6 +569,28 @@ export function createProviderMockApp() {
 
   // ─── Tigo Mock Endpoints ─────────────────────────────────────────────────────
 
+  
+ // Example assumes a standard Express.js style route
+app.post('/tigo/transaction', (req, res) => {
+  const authScenario = req.scenario['payment']; 
+  
+  if (!authScenario) {
+    return res.status(401).json({ error: 'Unauthorized: Missing token' });
+  }
+  
+  // simply parse a date string if it's passed directly.
+  const tokenDateString = extractDateFromToken(authScenario); // You'll need to see how the repo does this
+  const tokenExpiryDate = new Date(tokenDateString).getTime();
+  const currentDate = Date.now();
+
+  // The validation block sending the 401 response
+  if (tokenExpiryDate < currentDate) {
+    return res.status(401).json({ 
+      error: 'Unauthorized', 
+      message: 'Token has expired' 
+    });
+  }
+
   app.post(
     "/tigo/auth/token",
     async (req: Request, res: Response) => {
@@ -580,7 +602,7 @@ export function createProviderMockApp() {
     }
   );
 
-  app.post(
+    app.post(
     "/tigo/payment",
     async (req: Request<unknown, unknown, MockRequestBody>, res: Response) => {
       await applyDelay(req);
@@ -691,6 +713,11 @@ export function createProviderMockApp() {
 
   return app;
 }
+
+  // ...  transaction logic continues down here ...
+});
+
+
 
 function getVodacomStatus(scenario: MockScenario): "SUCCESSFUL" | "FAILED" | "PENDING" {
   if (scenario === "failed") return "FAILED";
