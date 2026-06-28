@@ -5,6 +5,8 @@ export interface Env {
   BACKUP_ORIGIN: string;
   HEALTH_CHECK_PATH?: string;
 
+  ALLOWED_ORIGINS?: string;
+
   // Geo-routing
   GEO_ROUTING_ENABLED?: string;
   REGION_NA_ORIGIN?: string;
@@ -54,6 +56,42 @@ const CONTINENT_TO_REGION: Record<string, string> = {
   AN: "NA", // Antarctica → nearest PoP is typically North/South America
 };
 
+function parseAllowedOrigins(raw: string | undefined): ReadonlySet<string> {
+  if (!raw) return new Set();
+  return new Set(
+    raw.split(",")
+      .map((o) => o.trim())
+      .filter((o) => o.length > 0 && !o.includes("*")),
+  );
+}
+
+function buildCorsHeaders(
+  origin: string,
+  allowedOrigins: ReadonlySet<string>,
+): Record<string, string> | null {
+  if (!origin || !allowedOrigins.has(origin)) return null;
+  return {
+    "Access-Control-Allow-Origin": origin,
+    "Access-Control-Allow-Credentials": "true",
+    "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Requested-With, X-Request-ID",
+    "Access-Control-Expose-Headers": "X-Request-ID",
+    "Access-Control-Max-Age": "600",
+  };
+}
+
+function addCorsHeaders(response: Response, corsHeaders: Record<string, string>): Response {
+  const headers = new Headers(response.headers);
+  for (const [key, value] of Object.entries(corsHeaders)) {
+    headers.set(key, value);
+  }
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
+}
+
 export function resolveOrigin(cf: IncomingRequestCfProperties | undefined, env: Env): string | null {
   if (!cf) {
     return null;
@@ -100,6 +138,19 @@ async function pingCheck(origin: string, path: string = '/health'): Promise<bool
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+    const allowedOrigins = parseAllowedOrigins(env.ALLOWED_ORIGINS);
+    const requestOrigin = request.headers.get("Origin") ?? "";
+    const corsHeaders = buildCorsHeaders(requestOrigin, allowedOrigins);
+    const withCors = (r: Response): Response =>
+      corsHeaders ? addCorsHeaders(r, corsHeaders) : r;
+
+    // Handle CORS preflight before any routing or health checks.
+    if (request.method === "OPTIONS") {
+      return corsHeaders
+        ? new Response(null, { status: 204, headers: corsHeaders })
+        : new Response(null, { status: 403 });
+    }
+
     const primary = env.PRIMARY_ORIGIN || "https://api.primary.example.com";
     const backup = env.BACKUP_ORIGIN || "https://api.backup.example.com";
     const healthPath = env.HEALTH_CHECK_PATH || "/health";
@@ -158,7 +209,7 @@ export default {
           body: request.body,
           redirect: 'manual'
         });
-        return await fetch(fallbackRequest);
+        return withCors(await fetch(fallbackRequest));
       }
 
       // Step 3b: Primary returned 5xx — fallback to backup (original behaviour).
@@ -171,10 +222,10 @@ export default {
           body: request.body,
           redirect: 'manual'
         });
-        return await fetch(backupRequest);
+        return withCors(await fetch(backupRequest));
       }
 
-      return response;
+      return withCors(response);
     } catch (err) {
       // Step 4a: Fetch to geo origin threw — fallback to primary.
       if (usingGeoOrigin) {
@@ -186,7 +237,7 @@ export default {
           body: request.body,
           redirect: 'manual'
         });
-        return await fetch(fallbackRequest);
+        return withCors(await fetch(fallbackRequest));
       }
 
       // Step 4b: Fetch to primary threw — fallback to backup (original behaviour).
@@ -199,10 +250,10 @@ export default {
           body: request.body,
           redirect: 'manual'
         });
-        return await fetch(backupRequest);
+        return withCors(await fetch(backupRequest));
       }
 
-      return new Response("Service Unavailable", { status: 503 });
+      return withCors(new Response("Service Unavailable", { status: 503 }));
     }
   }
 } satisfies ExportedHandler<Env>;
