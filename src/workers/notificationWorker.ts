@@ -63,7 +63,7 @@ export async function startNotificationWorker(): Promise<void> {
         await notificationRouter.routeTransactionNotification(tx, "failed", payload.error);
       }
     } catch (err) {
-      logger.error("NotificationWorker: failed to handle message:", err);
+      logger.error(err, "NotificationWorker: failed to handle message:");
     }
   });
 
@@ -92,7 +92,7 @@ export async function startNotificationWorker(): Promise<void> {
           await notificationRouter.routeTransactionNotification(tx, "failed", payload.error);
         }
       } catch (err) {
-        logger.error("NotificationWorker: failed to handle pmessage:", err);
+        logger.error(err, "NotificationWorker: failed to handle pmessage:");
       }
     },
   );
