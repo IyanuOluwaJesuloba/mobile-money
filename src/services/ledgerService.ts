@@ -1,6 +1,8 @@
 import { Pool } from 'pg';
 import { pool } from '../config/database';
 import { UserModel } from '../models/users';
+import { notifySlackAlert } from './loggers';
+import { createPagerDutyService } from './pagerDutyService';
 
 /**
  * Double-Entry Ledger Service
@@ -651,6 +653,97 @@ export class LedgerService {
       hasMore,
       limit: pageLimit,
     };
+  }
+
+  /**
+   * Compute 30-day payout velocity per provider from the ledger.
+   * Returns total credit amount on account 1100 (Mobile Money Float) per provider.
+   */
+  private async get30DayVelocityByProvider(): Promise<Map<string, number>> {
+    const since = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+    const result = await this.pool.query<{ provider: string; volume: string }>(
+      `SELECT
+         COALESCE(le.metadata->>'provider', 'unknown') AS provider,
+         SUM(le.credit_amount)                         AS volume
+       FROM ledger_entries le
+       JOIN accounts a ON le.account_id = a.id
+       WHERE a.code = '1100'
+         AND le.entry_date >= $1
+       GROUP BY le.metadata->>'provider'`,
+      [since]
+    );
+    const map = new Map<string, number>();
+    for (const row of result.rows) {
+      map.set(row.provider, parseFloat(row.volume) || 0);
+    }
+    return map;
+  }
+
+  /**
+   * Seasonal peak multiplier: boost expected volume by RESERVE_SEASONAL_PEAK_MULTIPLIER
+   * during months declared as peak (default: December=12 and April=4 for
+   * African mobile-money holiday cycles). Configurable via env vars.
+   */
+  private seasonalMultiplier(): number {
+    const peakMonths = (process.env.RESERVE_PEAK_MONTHS || '12,4')
+      .split(',')
+      .map(m => parseInt(m.trim(), 10));
+    const currentMonth = new Date().getMonth() + 1; // 1-based
+    if (peakMonths.includes(currentMonth)) {
+      return parseFloat(process.env.RESERVE_SEASONAL_PEAK_MULTIPLIER || '1.25');
+    }
+    return 1;
+  }
+
+  /**
+   * Check reserve liquidity for each provider.
+   * Triggers PagerDuty + Slack alerts when wallet balance / (30-day volume) < 110%.
+   *
+   * @param walletBalances  map of provider → current wallet balance (same currency as ledger)
+   */
+  async checkReserveLiquidity(
+    walletBalances: Record<string, number>
+  ): Promise<void> {
+    const RATIO_THRESHOLD = parseFloat(process.env.RESERVE_LIQUIDITY_RATIO || '1.1');
+    const velocity = await this.get30DayVelocityByProvider();
+    const seasonal = this.seasonalMultiplier();
+    const pagerDuty = createPagerDutyService();
+
+    for (const [provider, balance] of Object.entries(walletBalances)) {
+      const rawVolume = velocity.get(provider) ?? 0;
+      if (rawVolume === 0) continue; // no recent activity — skip
+
+      const expectedVolume = rawVolume * seasonal;
+      const ratio = balance / expectedVolume;
+
+      if (ratio < RATIO_THRESHOLD) {
+        const shortfallAmount = expectedVolume * RATIO_THRESHOLD - balance;
+
+        // PagerDuty alert
+        await pagerDuty.handleBalanceShortfall(
+          provider,
+          'reserve-liquidity',
+          expectedVolume * RATIO_THRESHOLD,
+          balance
+        );
+
+        // Slack alert
+        await notifySlackAlert(
+          {
+            statusCode: 500,
+            method: 'MONITOR',
+            path: `/reserve-liquidity/${provider}`,
+            timestamp: new Date().toISOString(),
+            error: new Error(
+              `Reserve liquidity below 110%: ${provider} balance=${balance.toFixed(2)} ` +
+              `expected=${expectedVolume.toFixed(2)} ratio=${(ratio * 100).toFixed(1)}% ` +
+              `shortfall=${shortfallAmount.toFixed(2)} seasonal_mult=${seasonal}`
+            ),
+          },
+          { appName: 'reserve-liquidity-monitor' }
+        );
+      }
+    }
   }
 }
 
