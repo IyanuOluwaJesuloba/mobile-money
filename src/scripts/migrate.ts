@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { printError } from "./momo-cli";
+import { printError } from "../utils/cli";
 /**
  * Migration Runner (Issue #45)
  *

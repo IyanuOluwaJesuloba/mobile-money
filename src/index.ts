@@ -11,7 +11,7 @@ import dotenv from "dotenv";
 import helmet from "helmet";
 import * as Sentry from "@sentry/node";
 import { register } from "prom-client";
-import spdy from "spdy";
+import http2 from "http2";
 import fs from "fs";
 import session from "express-session";
 import type { SessionOptions } from "express-session";
@@ -619,7 +619,7 @@ async function initializeRuntime(): Promise<void> {
       cert: fs.readFileSync(path.join(__dirname, "../certs/cert.pem")),
     };
 
-    const http2Server = spdy.createServer(sslOptions, app);
+    const http2Server = http2.createSecureServer({ ...sslOptions, allowHTTP1: true }, app);
     http2Server.listen(PORT, () => {
       console.log(`HTTP/2 server running on https://localhost:${PORT}`);
     });
