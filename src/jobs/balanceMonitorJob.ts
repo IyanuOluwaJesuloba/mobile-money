@@ -3,6 +3,9 @@ import * as StellarSdk from "stellar-sdk";
 import { getStellarServer } from "../config/stellar";
 import { notifySlackAlert } from "../services/loggers";
 import { calculateStellarReserve, formatReserveInfo } from "../utils/stellarReserveCalculator";
+import { ledgerService } from "../services/ledgerService";
+import { MTNProvider } from "../services/mobilemoney/providers/mtn";
+import { AirtelService } from "../services/mobilemoney/providers/airtel";
 
 /**
  * Balance Monitor Job
@@ -187,4 +190,28 @@ async function checkBalancesAndAlert(): Promise<void> {
 
 export async function runBalanceMonitorJob(): Promise<void> {
   await checkBalancesAndAlert();
+
+  // Fetch provider wallet balances and check reserve liquidity ratios
+  try {
+    const mtn = new MTNProvider();
+    const airtel = new AirtelService();
+    const [mtnResult, airtelResult] = await Promise.all([
+      mtn.getOperationalBalance().catch(() => null),
+      airtel.getOperationalBalance().catch(() => null),
+    ]);
+
+    const walletBalances: Record<string, number> = {};
+    if (mtnResult?.success && mtnResult.data) {
+      walletBalances['mtn'] = (mtnResult.data as any).availableBalance ?? 0;
+    }
+    if (airtelResult?.success && airtelResult.data) {
+      walletBalances['airtel'] = (airtelResult.data as any).availableBalance ?? 0;
+    }
+
+    if (Object.keys(walletBalances).length > 0) {
+      await ledgerService.checkReserveLiquidity(walletBalances);
+    }
+  } catch (err) {
+    logger.error('[balance-monitor] Reserve liquidity check failed:', err);
+  }
 }
